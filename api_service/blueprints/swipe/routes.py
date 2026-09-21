@@ -51,9 +51,12 @@ def swipe_status():
 
 
 @swipe_bp.route("/batch", methods=["GET"])
-@limiter.limit("20 per minute")
+@limiter.limit("90 per minute")
 async def swipe_batch():
-    """Return the next batch of cards.
+    """Return the next batch of cards, or ``pending: true`` while it is generated.
+
+    Generation runs in the background so this request never holds the app's single
+    request thread; the client asks again every second or two while pending.
 
     Query parameters:
         media_type (str): 'movie', 'tv' or 'both' (default).
@@ -110,10 +113,10 @@ async def swipe_request():
 
 @swipe_bp.route("/profile", methods=["GET"])
 def swipe_profile_get():
-    """Return the caller's taste profile (``profile`` is null before the first one)."""
+    """Return the caller's taste profile (null before the first one), whether a
+    background refresh is running, and the error of the last one if it failed."""
     try:
-        profile = SwipeService().db.get_taste_profile(int(g.current_user["id"]))
-        return jsonify({"status": "success", "profile": profile}), 200
+        return jsonify({"status": "success", **SwipeService().profile_state(g.current_user)}), 200
     except Exception as exc:
         return _handle(exc, "profile")
 
@@ -139,13 +142,14 @@ def swipe_profile_put():
 
 @swipe_bp.route("/profile/refresh", methods=["POST"])
 @limiter.limit("6 per minute")
-async def swipe_profile_refresh():
-    """Rewrite the taste profile now from recent votes and viewing history."""
+def swipe_profile_refresh():
+    """Start rewriting the taste profile in the background; poll GET /profile."""
     try:
         service = SwipeService()
-        text = await service.refresh_profile(g.current_user)
-        profile = service.db.get_taste_profile(int(g.current_user["id"])) if text else None
-        return jsonify({"status": "success", "profile": profile}), 200
+        if not service.llm_configured(g.current_user["id"]):
+            return jsonify(_LLM_NOT_CONFIGURED), 400
+        started = service.start_profile_refresh(g.current_user)
+        return jsonify({"status": "success", "refreshing": True, "started": started}), 202
     except Exception as exc:
         return _handle(exc, "profile refresh")
 

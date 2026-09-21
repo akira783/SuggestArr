@@ -223,5 +223,12 @@ Trakt et recherche web comme sources (v2) ; engagement Plex (v2) ; repli sans IA
   dans une boucle éphémère) ; un seul préchargement à la fois par (compte, type, envie, mode).
 - **Genres dans le prompt + poids des preuves** : sans genres, le LLM prenait un documentaire
   pour de l'action ; un film vu une fois est un signal faible.
+- **Génération en tâche de fond + polling** : SuggestArr sert Flask via `WsgiToAsgi`, qui exécute
+  toutes les requêtes dans **un seul thread** ; un lot (~10–15 s de LLM) gelait toute l'appli
+  (mesuré : un `/status` attendait 9,5 s). `/api/swipe/batch` répond donc tout de suite avec un lot
+  prêt ou `pending: true` (le client repasse toutes les 1,5 s, 90 s max), et
+  `/api/swipe/profile/refresh` démarre la réécriture en arrière-plan (202) ; `GET /profile` expose
+  `refreshing` et `refresh_error` (rapporté une fois). Un lot terminé mais vide n'est pas « pending »
+  et ne relance rien, pour ne pas payer des générations vides en boucle.
 - Réponse de `/api/swipe/request` : champ `request_status` (`awaiting_approval`, `queued`,
   `already_requested`), distinct du `status` générique des réponses.

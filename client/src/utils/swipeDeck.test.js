@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  cardKey, cardYear, dragRotation, keyToAction, mergeCards, needsMore, pickLabel,
+  cardKey, cardYear, dragRotation, keyToAction, mergeCards, needsMore, pickLabel, sleep,
   requestMessage, streamingLabel, swipeDecision,
 } from './swipeDeck.js';
 
@@ -68,4 +68,10 @@ test('request feedback follows the request status', () => {
   assert.equal(requestMessage('awaiting_approval', 'Dune'), 'Dune is waiting for approval in Requests.');
   assert.equal(requestMessage('queued', 'Dune'), 'Dune has been requested.');
   assert.equal(requestMessage('already_requested', 'Dune'), 'Dune was already requested.');
+});
+
+test('sleep resolves after the delay', async () => {
+  const start = Date.now();
+  await sleep(20);
+  assert.ok(Date.now() - start >= 15);
 });

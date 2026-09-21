@@ -2,6 +2,13 @@
 
 export const SWIPE_THRESHOLD = 0.3;
 export const PREFETCH_WHEN_LEFT = 3;
+// Batches and profile rewrites are generated in the background; the page polls.
+export const POLL_INTERVAL_MS = 1500;
+export const MAX_POLLS = 60;
+
+export function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 export function cardKey(card) {
   return `${card.media_type}-${card.id}`;

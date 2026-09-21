@@ -7,8 +7,11 @@ Flow for one user:
    adventurous picks around their taste profile), resolves them on TMDb, drops
    anything already voted, requested, in the library or recently served, and adds
    streaming badges and external ratings.
-2. While the user swipes, the following batch is generated in a background thread
-   so it is ready when the client asks for it.
+2. Batches are always generated in a background thread and handed over through a
+   per-process store. The app serves every request from a single thread
+   (``WsgiToAsgi``), so a request waiting ~10 s on the LLM would freeze the whole UI:
+   instead ``next_batch`` answers at once, either with a ready batch (and starts
+   the next one) or with ``pending: True`` so the client polls again.
 3. ``vote`` stores each answer; every ``PROFILE_REFRESH_EVERY`` votes (and when
    calibration completes) the taste profile is rewritten by the LLM in the
    background.
@@ -56,8 +59,11 @@ class _PrefetchStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._batches = {}
+        self._errors = {}
         self._pending = set()
         self._served = {}
+        self._refreshing = set()
+        self._refresh_errors = {}
 
     def take(self, key):
         with self._lock:
@@ -65,6 +71,15 @@ class _PrefetchStore:
         if entry and time.monotonic() - entry['created'] < PREFETCH_TTL_SECONDS:
             return entry['result']
         return None
+
+    def take_error(self, key):
+        """Return (once) the exception that ended the last generation for *key*."""
+        with self._lock:
+            return self._errors.pop(key, None)
+
+    def is_pending(self, key):
+        with self._lock:
+            return key in self._pending
 
     def start(self, key):
         """Mark a prefetch as running; False if one is already running for *key*."""
@@ -74,11 +89,33 @@ class _PrefetchStore:
             self._pending.add(key)
             return True
 
-    def put(self, key, result):
+    def put(self, key, result, error=None):
         with self._lock:
             self._pending.discard(key)
-            if result is not None:
+            if error is not None:
+                self._errors[key] = error
+            elif result is not None:
                 self._batches[key] = {'result': result, 'created': time.monotonic()}
+
+    def start_refresh(self, user_id):
+        """Mark a profile refresh as running; False if one already is."""
+        with self._lock:
+            if user_id in self._refreshing:
+                return False
+            self._refreshing.add(user_id)
+            self._refresh_errors.pop(user_id, None)
+            return True
+
+    def end_refresh(self, user_id, error=None):
+        with self._lock:
+            self._refreshing.discard(user_id)
+            if error is not None:
+                self._refresh_errors[user_id] = error
+
+    def refresh_state(self, user_id):
+        """(running, error) for the user's profile refresh; the error is returned once."""
+        with self._lock:
+            return user_id in self._refreshing, self._refresh_errors.pop(user_id, None)
 
     def remember_served(self, user_id, keys):
         with self._lock:
@@ -94,6 +131,8 @@ class _PrefetchStore:
             self._served.pop(user_id, None)
             for key in [k for k in self._batches if k[0] == user_id]:
                 del self._batches[key]
+            for key in [k for k in self._errors if k[0] == user_id]:
+                del self._errors[key]
 
 
 _store = _PrefetchStore()
@@ -221,8 +260,12 @@ class SwipeService:
         :param mood: Optional free-text wish for this session.
         :param mode: 'auto' (calibration until enough votes), 'normal' or 'calibration'.
         :param size: Number of cards wanted.
-        :return: Dict with 'mode', 'cards' and 'calibration' progress.
+        :return: Dict with 'mode', 'cards', 'pending' and 'calibration' progress.
+            When no batch is ready yet, 'cards' is empty and 'pending' is True: the
+            client should ask again shortly.
         :raises SwipeError: On invalid arguments.
+        :raises Exception: The error that ended the last background generation for
+            these filters (e.g. ``LLMValidationError``), reported once.
         """
         if media_type not in MEDIA_TYPES:
             raise SwipeError(f"media_type must be one of {', '.join(MEDIA_TYPES)}")
@@ -231,34 +274,44 @@ class SwipeService:
         effective = self._effective_mode(user_id, mode)
         key = (user_id, media_type, (mood or '').lower(), effective)
 
-        cards = self.store.take(key)
-        if cards is not None:
+        ready = self.store.take(key)
+        if ready is not None:
             voted = self.db.get_swipe_voted_ids(user_id)
-            cards = [c for c in cards if (str(c['id']), c['media_type']) not in voted]
-        if not cards:
-            cards = await self.generate_batch(user, media_type, mood, effective, size)
-        self.store.remember_served(user_id, [(str(c['id']), c['media_type']) for c in cards])
-        self._prefetch(user, media_type, mood, effective, size, key)
+            cards = [c for c in ready if (str(c['id']), c['media_type']) not in voted]
+            pending = False
+            if cards:
+                self.store.remember_served(user_id, [(str(c['id']), c['media_type']) for c in cards])
+                self._generate_in_background(user, media_type, mood, effective, size, key)
+            # A finished but empty batch is returned as such, without starting another
+            # one: otherwise a polling client would keep paying for empty generations.
+        else:
+            error = self.store.take_error(key)
+            if error is not None:
+                raise error
+            cards, pending = [], True
+            self._generate_in_background(user, media_type, mood, effective, size, key)
 
         votes = self.db.count_swipe_votes(user_id)
         return {
             'mode': effective,
             'cards': cards,
+            'pending': pending,
             'calibration': {'done': min(votes, CALIBRATION_TARGET), 'target': CALIBRATION_TARGET},
         }
 
-    def _prefetch(self, user, media_type, mood, mode, size, key):
+    def _generate_in_background(self, user, media_type, mood, mode, size, key):
         if not self.store.start(key):
             return
 
         async def job():
-            result = None
             try:
                 result = await self.generate_batch(user, media_type, mood, mode, size)
-            finally:
-                self.store.put(key, result)
+            except Exception as exc:
+                self.store.put(key, None, error=exc)
+                raise
+            self.store.put(key, result)
 
-        _run_in_background(job, f"prefetch-{key[0]}")
+        _run_in_background(job, f"batch-{key[0]}")
 
     async def generate_batch(self, user, media_type, mood, mode, size):
         """Ask the LLM for cards and turn them into enriched TMDb cards.
@@ -434,7 +487,7 @@ class SwipeService:
         calibration_done = total == CALIBRATION_TARGET
         refresh = pending >= PROFILE_REFRESH_EVERY or calibration_done
         if refresh:
-            _run_in_background(lambda: self.refresh_profile(user), f"profile-{user_id}")
+            self.start_profile_refresh(user)
         return {'vote': stored, 'profile_refresh': refresh}
 
     async def request(self, user, card):
@@ -503,6 +556,36 @@ class SwipeService:
         self.db.save_taste_profile(user_id, text, user_edited=bool(current and current['user_edited']))
         logger.info("Taste profile refreshed for user %s (%d chars)", user_id, len(text))
         return text
+
+    def start_profile_refresh(self, user):
+        """Rewrite the profile in the background; poll ``profile_state`` for the result.
+
+        :return: True if a refresh was started, False if one is already running.
+        """
+        user_id = int(user['id'])
+        if not self.store.start_refresh(user_id):
+            return False
+
+        async def job():
+            try:
+                await self.refresh_profile(user)
+            except Exception as exc:
+                self.store.end_refresh(user_id, error=exc)
+                raise
+            self.store.end_refresh(user_id)
+
+        _run_in_background(job, f"profile-{user_id}")
+        return True
+
+    def profile_state(self, user):
+        """The profile plus whether a background refresh is running or just failed."""
+        user_id = int(user['id'])
+        refreshing, error = self.store.refresh_state(user_id)
+        return {
+            'profile': self.db.get_taste_profile(user_id),
+            'refreshing': refreshing,
+            'refresh_error': str(error) if error is not None else None,
+        }
 
     def save_profile(self, user, profile_text):
         """Store a profile written or corrected by the user."""

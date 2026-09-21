@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from api_service.db.components.schema_manager import SchemaManager
+from api_service.exceptions.api_exceptions import LLMValidationError
 from api_service.db.components.swipe_mixin import SwipeMixin
 from api_service.services.swipe import swipe_service as svc
 from api_service.services.swipe.swipe_service import (
@@ -111,7 +112,6 @@ class FakeTmdb:
 
 
 def _llm_error():
-    from api_service.exceptions.api_exceptions import LLMValidationError
     return LLMValidationError('bad json')
 
 
@@ -137,6 +137,23 @@ class SwipeServiceCase(unittest.IsolatedAsyncioTestCase):
                                side_effect=lambda factory, name: self.background.append((name, factory)))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    async def _drain(self):
+        """Run the background jobs captured so far, as the worker thread would."""
+        while self.background:
+            _, factory = self.background.pop(0)
+            try:
+                await factory()
+            except Exception:
+                pass
+
+    async def _next(self, *args, **kwargs):
+        """Ask for a batch; if it is pending, let the background job finish and ask again."""
+        result = await self.service.next_batch(*args, **kwargs)
+        if not result['pending']:
+            return result
+        await self._drain()
+        return await self.service.next_batch(*args, **kwargs)
 
     def _vote_many(self, user_id, count, vote='like'):
         for i in range(count):
@@ -191,7 +208,7 @@ class TestBatches(SwipeServiceCase):
         catalogue = {('movie', 'Inception'): _item(27205, 'Inception', 2010)}
         llm, make, _ = self._patch_llm(suggestions, catalogue)
         with llm as generate, make:
-            result = await self.service.next_batch(ADMIN, media_type='movie')
+            result = await self._next(ADMIN, media_type='movie')
         self.assertEqual(result['mode'], 'calibration')
         self.assertEqual(generate.await_args.kwargs['mode'], 'calibration')
 
@@ -200,7 +217,7 @@ class TestBatches(SwipeServiceCase):
         llm, make, _ = self._patch_llm([_suggestion('Arrival')],
                                        {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
         with llm as generate, make:
-            result = await self.service.next_batch(ADMIN, media_type='movie')
+            result = await self._next(ADMIN, media_type='movie')
         self.assertEqual(result['mode'], 'normal')
         kwargs = generate.await_args.kwargs
         self.assertEqual(kwargs['profile_text'], 'Loves sci-fi.')
@@ -214,7 +231,7 @@ class TestBatches(SwipeServiceCase):
         profile = patch('api_service.services.llm.llm_service.update_taste_profile',
                         AsyncMock(return_value='Fresh profile.'))
         with llm, make, profile as update:
-            await self.service.next_batch(ADMIN, media_type='movie')
+            await self._next(ADMIN, media_type='movie')
         update.assert_awaited_once()
         self.assertEqual(self.db.get_taste_profile(1)['profile_text'], 'Fresh profile.')
 
@@ -243,7 +260,7 @@ class TestBatches(SwipeServiceCase):
         }
         llm, make, tmdb = self._patch_llm(suggestions, catalogue)
         with llm, make:
-            result = await self.service.next_batch(ADMIN, media_type='both', mode='normal')
+            result = await self._next(ADMIN, media_type='both', mode='normal')
 
         self.assertEqual([c['id'] for c in result['cards']], [438631])
         card = result['cards'][0]
@@ -262,7 +279,7 @@ class TestBatches(SwipeServiceCase):
         broken = patch('api_service.services.llm.llm_service.update_taste_profile',
                        AsyncMock(side_effect=_llm_error()))
         with llm as generate, make, broken:
-            result = await self.service.next_batch(ADMIN, media_type='movie')
+            result = await self._next(ADMIN, media_type='movie')
         self.assertEqual([c['id'] for c in result['cards']], [329865])
         self.assertIsNone(generate.await_args.kwargs['profile_text'])
 
@@ -272,7 +289,7 @@ class TestBatches(SwipeServiceCase):
             {('tv', 'Dark'): {'id': 70523, 'name': 'Dark', 'first_air_date': '2017-12-01'}},
         )
         with llm, make:
-            result = await self.service.next_batch(ADMIN, media_type='tv', mode='normal')
+            result = await self._next(ADMIN, media_type='tv', mode='normal')
         self.assertEqual([(c['id'], c['media_type']) for c in result['cards']], [(70523, 'tv')])
 
     async def test_invalid_arguments(self):
@@ -281,31 +298,67 @@ class TestBatches(SwipeServiceCase):
         with self.assertRaises(SwipeError):
             await self.service.next_batch(ADMIN, mode='random')
 
+    async def test_first_call_is_pending_and_starts_generation(self):
+        llm, make, _ = self._patch_llm([], {})
+        with llm as generate, make:
+            result = await self.service.next_batch(ADMIN, media_type='movie', mode='calibration')
+        self.assertTrue(result['pending'])
+        self.assertEqual(result['cards'], [])
+        generate.assert_not_awaited()
+        self.assertEqual(len(self.background), 1)
+
     async def test_prefetched_batch_is_served_without_new_llm_call(self):
         catalogue = {('movie', f'M{i}'): _item(100 + i, f'M{i}') for i in range(4)}
         llm, make, _ = self._patch_llm([_suggestion('M0'), _suggestion('M1')], catalogue)
         with llm, make:
-            await self.service.next_batch(ADMIN, media_type='movie', mode='calibration')
-        [(name, factory)] = self.background
-        self.assertTrue(name.startswith('prefetch-'))
+            first = await self._next(ADMIN, media_type='movie', mode='calibration')
+        self.assertEqual([c['id'] for c in first['cards']], [100, 101])
+        # Serving the first batch started the next one.
+        self.assertEqual(len(self.background), 1)
 
         llm, make, _ = self._patch_llm([_suggestion('M2'), _suggestion('M3')], catalogue)
         with llm, make:
-            await factory()
+            await self._drain()
         # The user votes on one prefetched card before asking for the next batch.
         self.db.set_swipe_vote(1, 102, 'movie', 'like')
         llm, make, _ = self._patch_llm([], catalogue)
         with llm as generate, make:
             result = await self.service.next_batch(ADMIN, media_type='movie', mode='calibration')
         generate.assert_not_awaited()
+        self.assertFalse(result['pending'])
         self.assertEqual([c['id'] for c in result['cards']], [103])
 
-    async def test_one_prefetch_at_a_time_per_key(self):
+    async def test_empty_batch_is_not_pending_and_does_not_regenerate(self):
+        llm, make, _ = self._patch_llm([_suggestion('Unknown')], {})
+        with llm as generate, make:
+            result = await self._next(ADMIN, media_type='movie', mode='calibration')
+            self.assertFalse(result['pending'])
+            self.assertEqual(result['cards'], [])
+            self.assertEqual(self.background, [])
+            self.assertEqual(generate.await_count, 1)
+            # Asking again (the "Try again" button) starts a new attempt.
+            self.assertTrue((await self.service.next_batch(ADMIN, media_type='movie',
+                                                          mode='calibration'))['pending'])
+
+    async def test_one_generation_at_a_time_per_key(self):
         llm, make, _ = self._patch_llm([], {})
         with llm, make:
             await self.service.next_batch(ADMIN, media_type='movie', mode='calibration')
             await self.service.next_batch(ADMIN, media_type='movie', mode='calibration')
         self.assertEqual(len(self.background), 1)
+
+    async def test_background_failure_is_reported_once(self):
+        make = patch('api_service.services.ai_search.ai_search_service.AiSearchService._make_tmdb_client',
+                     MagicMock(return_value=FakeTmdb({})))
+        broken = patch('api_service.services.llm.llm_service.generate_swipe_batch',
+                       AsyncMock(side_effect=_llm_error()))
+        with broken, make:
+            self.assertTrue((await self.service.next_batch(ADMIN, mode='calibration'))['pending'])
+            await self._drain()
+            with self.assertRaises(LLMValidationError):
+                await self.service.next_batch(ADMIN, mode='calibration')
+            # The error is reported once; the next call starts a fresh attempt.
+            self.assertTrue((await self.service.next_batch(ADMIN, mode='calibration'))['pending'])
 
 
 class TestBalance(unittest.TestCase):
@@ -435,6 +488,28 @@ class TestProfile(SwipeServiceCase):
         with patch('api_service.services.llm.llm_service.update_taste_profile', AsyncMock()) as update:
             self.assertIsNone(await self.service.refresh_profile(MEMBER))
         update.assert_not_awaited()
+
+    async def test_background_refresh_and_state(self):
+        self._vote_many(1, 2)
+        self.assertTrue(self.service.start_profile_refresh(ADMIN))
+        self.assertFalse(self.service.start_profile_refresh(ADMIN))
+        self.assertTrue(self.service.profile_state(ADMIN)['refreshing'])
+        with patch('api_service.services.llm.llm_service.update_taste_profile',
+                   AsyncMock(return_value='Written in the background.')):
+            await self._drain()
+        state = self.service.profile_state(ADMIN)
+        self.assertFalse(state['refreshing'])
+        self.assertIsNone(state['refresh_error'])
+        self.assertEqual(state['profile']['profile_text'], 'Written in the background.')
+
+    async def test_background_refresh_error_is_reported_once(self):
+        self._vote_many(1, 2)
+        self.service.start_profile_refresh(ADMIN)
+        with patch('api_service.services.llm.llm_service.update_taste_profile',
+                   AsyncMock(side_effect=_llm_error())):
+            await self._drain()
+        self.assertEqual(self.service.profile_state(ADMIN)['refresh_error'], 'bad json')
+        self.assertIsNone(self.service.profile_state(ADMIN)['refresh_error'])
 
     def test_manual_save_and_reset(self):
         profile = self.service.save_profile(ADMIN, 'Mine.')

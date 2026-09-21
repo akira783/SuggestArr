@@ -36,16 +36,19 @@
             <i class="fas fa-times"></i>
           </button>
         </form>
+        <button type="button" class="btn btn-secondary btn-sm swipe-taste-btn" @click="profileOpen = true">
+          <i class="fas fa-user-astronaut"></i> My taste
+        </button>
       </div>
 
       <!-- Calibration banner -->
       <div v-if="inCalibration" class="swipe-calibration">
         <div class="swipe-calibration-text">
-          <strong>Calibration {{ calibration.done }}/{{ calibration.target }}</strong>
+          <strong>Calibration {{ calibrationView.done }}/{{ calibrationView.target }}</strong>
           <span>Well-known titles to learn your taste fast. Use <em>Already seen</em> for the ones you know.</span>
         </div>
-        <div class="swipe-progress" role="progressbar" :aria-valuenow="calibration.done"
-             aria-valuemin="0" :aria-valuemax="calibration.target">
+        <div class="swipe-progress" role="progressbar" :aria-valuenow="calibrationView.done"
+             aria-valuemin="0" :aria-valuemax="calibrationView.target">
           <div class="swipe-progress-bar" :style="{ width: calibrationPercent + '%' }"></div>
         </div>
         <button type="button" class="btn btn-ghost btn-sm" @click="skipCalibration">Skip</button>
@@ -161,6 +164,13 @@
       <p v-if="currentCard" class="swipe-hint">Swipe or use ← ↓ → on your keyboard</p>
     </template>
 
+    <SwipeProfilePanel
+      :open="profileOpen"
+      @close="profileOpen = false"
+      @reset="onVotesReset"
+      @recalibrate="startCalibration"
+    />
+
     <!-- Request? -->
     <teleport to="body">
       <transition name="modal-fade">
@@ -221,9 +231,10 @@
 <script>
 import { swipeBatch, swipeRequest, swipeStatus, swipeVote } from '@/api/swipeApi.js';
 import {
-  cardKey, cardTitle, cardYear, dragRotation, keyToAction, mediaNoun, mergeCards, needsMore,
-  pickLabel, requestMessage, streamingLabel, swipeDecision,
+  MAX_POLLS, POLL_INTERVAL_MS, cardKey, cardTitle, cardYear, dragRotation, keyToAction, mediaNoun,
+  mergeCards, needsMore, pickLabel, requestMessage, sleep, streamingLabel, swipeDecision,
 } from '@/utils/swipeDeck.js';
+import SwipeProfilePanel from './SwipeProfilePanel.vue';
 import '@/assets/styles/swipePage.css';
 
 const SKIP_CALIBRATION_KEY = 'suggestarr_swipe_skip_calibration';
@@ -247,6 +258,8 @@ function writeStorage(key, value) {
 
 export default {
   name: 'SwipePage',
+
+  components: { SwipeProfilePanel },
 
   data() {
     return {
@@ -275,6 +288,9 @@ export default {
       requesting: false,
       seenCard: null,
       generation: 0,
+      profileOpen: false,
+      // A calibration run started from the panel counts its own votes.
+      forcedCalibration: null,
     };
   },
 
@@ -291,8 +307,11 @@ export default {
     inCalibration() {
       return this.activeMode === 'calibration';
     },
+    calibrationView() {
+      return this.forcedCalibration || this.calibration;
+    },
     calibrationPercent() {
-      const { done, target } = this.calibration;
+      const { done, target } = this.calibrationView;
       return target ? Math.min(100, Math.round((done / target) * 100)) : 0;
     },
     cardStyle() {
@@ -303,7 +322,7 @@ export default {
       };
     },
     modalOpen() {
-      return Boolean(this.requestCard || this.seenCard);
+      return Boolean(this.requestCard || this.seenCard || this.profileOpen);
     },
   },
 
@@ -358,13 +377,23 @@ export default {
       this.loading = true;
       this.error = '';
       try {
-        const { data } = await swipeBatch({ mediaType: this.mediaType, mood: this.mood, mode: this.mode });
-        // A filter change while this batch was loading makes it stale.
-        if (generation !== this.generation) return;
-        this.activeMode = data.mode;
-        this.calibration = data.calibration || this.calibration;
-        this.deck = mergeCards(this.deck, data.cards, this.answered);
-        if (!data.cards.length && reset) this.error = 'The AI found nothing new for these filters.';
+        for (let attempt = 0; attempt < MAX_POLLS; attempt += 1) {
+          const { data } = await swipeBatch({ mediaType: this.mediaType, mood: this.mood, mode: this.mode });
+          // A filter change while this batch was loading makes it stale.
+          if (generation !== this.generation) return;
+          this.activeMode = data.mode;
+          if (!this.forcedCalibration) this.calibration = data.calibration || this.calibration;
+          if (!data.pending) {
+            this.deck = mergeCards(this.deck, data.cards, this.answered);
+            if (!data.cards.length && this.position >= this.deck.length) {
+              this.error = 'The AI found nothing new for these filters.';
+            }
+            return;
+          }
+          await sleep(POLL_INTERVAL_MS);
+          if (generation !== this.generation) return;
+        }
+        this.error = 'Cards are taking too long to arrive. Try again in a moment.';
       } catch (error) {
         if (generation !== this.generation) return;
         this.error = error?.response?.data?.message || 'Could not load cards.';
@@ -400,8 +429,26 @@ export default {
     },
 
     skipCalibration() {
+      this.forcedCalibration = null;
       this.mode = 'normal';
       writeStorage(SKIP_CALIBRATION_KEY, '1');
+      this.loading = false;
+      this.loadMore(true);
+    },
+
+    startCalibration() {
+      this.forcedCalibration = { done: 0, target: this.calibration.target };
+      this.mode = 'calibration';
+      this.loading = false;
+      this.loadMore(true);
+    },
+
+    onVotesReset() {
+      this.answered = new Set();
+      this.forcedCalibration = null;
+      this.calibration = { ...this.calibration, done: 0 };
+      this.mode = 'auto';
+      writeStorage(SKIP_CALIBRATION_KEY, '0');
       this.loading = false;
       this.loadMore(true);
     },
@@ -445,7 +492,15 @@ export default {
 
     async submitVote(card, vote) {
       this.answered.add(cardKey(card));
-      if (this.inCalibration && this.calibration.done < this.calibration.target) {
+      if (this.forcedCalibration) {
+        const done = this.forcedCalibration.done + 1;
+        if (done >= this.forcedCalibration.target) {
+          this.forcedCalibration = null;
+          this.mode = readStorage(SKIP_CALIBRATION_KEY, '') === '1' ? 'normal' : 'auto';
+        } else {
+          this.forcedCalibration = { ...this.forcedCalibration, done };
+        }
+      } else if (this.inCalibration && this.calibration.done < this.calibration.target) {
         this.calibration = { ...this.calibration, done: this.calibration.done + 1 };
       }
       try {

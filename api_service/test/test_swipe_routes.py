@@ -105,12 +105,14 @@ class TestVoteAndRequest(SwipeRouteCase):
 class TestProfileRoutes(SwipeRouteCase):
 
     def test_get_profile_for_caller(self):
-        self.service.db.get_taste_profile.return_value = None
+        self.service.profile_state.return_value = {'profile': None, 'refreshing': True,
+                                                   'refresh_error': None}
         self._context()
         response, status = routes.swipe_profile_get()
         self.assertEqual(status, 200)
         self.assertIsNone(response.get_json()['profile'])
-        self.service.db.get_taste_profile.assert_called_once_with(7)
+        self.assertTrue(response.get_json()['refreshing'])
+        self.service.profile_state.assert_called_once_with(USER)
 
     def test_put_profile_requires_string(self):
         self._context(method='PUT', json={'profile_text': 42})
@@ -125,13 +127,20 @@ class TestProfileRoutes(SwipeRouteCase):
         self.assertEqual(status, 200)
         self.service.save_profile.assert_called_once_with(USER, 'Mine.')
 
-    async def test_refresh(self):
-        self.service.refresh_profile = AsyncMock(return_value='New.')
-        self.service.db.get_taste_profile.return_value = {'profile_text': 'New.'}
+    def test_refresh_starts_in_background(self):
+        self.service.start_profile_refresh.return_value = True
         self._context(method='POST')
-        response, status = await routes.swipe_profile_refresh.__wrapped__()
-        self.assertEqual(status, 200)
-        self.assertEqual(response.get_json()['profile'], {'profile_text': 'New.'})
+        response, status = routes.swipe_profile_refresh.__wrapped__()
+        self.assertEqual(status, 202)
+        self.assertEqual(response.get_json()['started'], True)
+        self.service.start_profile_refresh.assert_called_once_with(USER)
+
+    def test_refresh_needs_llm(self):
+        self.service.llm_configured.return_value = False
+        self._context(method='POST')
+        response, status = routes.swipe_profile_refresh.__wrapped__()
+        self.assertEqual(status, 400)
+        self.service.start_profile_refresh.assert_not_called()
 
     def test_stats_and_reset(self):
         self.service.db.get_swipe_stats.return_value = {'total': 0}
