@@ -513,6 +513,7 @@ export default {
         { value: 'requests', label: 'Requests', icon: 'fas fa-film', required: false },
         { value: 'jobs', label: 'Jobs', icon: 'fas fa-briefcase', required: false },
         { value: 'ai_search', label: 'AI Search', icon: 'fas fa-robot', required: false },
+        { value: 'swipe', label: 'Swipe', icon: 'fas fa-layer-group', required: false },
         { value: 'profile', label: 'Profile', icon: 'fas fa-user-circle', required: true },
       ],
     };

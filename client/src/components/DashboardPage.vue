@@ -346,6 +346,7 @@ import SettingsAdvanced from './settings/SettingsAdvanced.vue';
 import SettingsRequests from './settings/SettingsRequests.vue';
 import SettingsJobs from './settings/SettingsJobs.vue';
 import AiSearchPage from './settings/AiSearchPage.vue';
+import SwipePage from './settings/SwipePage.vue';
 import LogsComponent from './LogsComponent.vue';
 import UserManagement from './settings/UserManagement.vue';
 import UserProfile from './settings/UserProfile.vue';
@@ -365,6 +366,7 @@ export default {
     SettingsRequests,
     SettingsJobs,
     AiSearchPage,
+    SwipePage,
     LogsComponent,
     UserManagement,
     UserProfile,
@@ -420,6 +422,7 @@ export default {
       tabs: [
         { id: 'requests',  name: 'Requests',  icon: 'fas fa-paper-plane', tourId: 'tab-requests' },
         { id: 'ai_search', name: 'AI Search', icon: 'fas fa-magic',       isBeta: true,           tourId: 'tab-ai-search' },
+        { id: 'swipe',     name: 'Swipe',     icon: 'fas fa-layer-group', isBeta: true,           tourId: 'tab-swipe' },
         { id: 'services',  name: 'Services',  icon: 'fas fa-plug',         tourId: 'tab-services', adminOnly: true },
         { id: 'jobs',      name: 'Jobs',       icon: 'fas fa-briefcase',   tourId: 'tab-jobs' },
         { id: 'database',  name: 'Database',  icon: 'fas fa-database',     tourId: 'tab-database', adminOnly: true },
@@ -457,6 +460,12 @@ export default {
           targetId: 'tab-ai-search',
           title: 'AI Search',
           description: 'Describe what you\'re in the mood for in plain language — "a tense thriller set in space" — and SuggestArr uses an LLM to find and request matching titles for you.',
+          position: 'bottom',
+        },
+        {
+          targetId: 'tab-swipe',
+          title: 'Swipe',
+          description: 'Get AI-picked movies and series one card at a time. Like, pass or mark as already seen: every answer sharpens your taste profile, and liked cards can be requested in one click.',
           position: 'bottom',
         },
         {
@@ -514,6 +523,7 @@ export default {
         advanced: 'SettingsAdvanced',
         logs: 'LogsComponent',
         ai_search: 'AiSearchPage',
+        swipe: 'SwipePage',
         users: 'UserManagement',
         profile: 'UserProfile',
       };

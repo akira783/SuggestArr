@@ -314,7 +314,7 @@ def _build_synthetic_bypass_user() -> dict:
         "username": username,
         "role": "admin",
         "can_manage_ai": 1,
-        "visible_tabs": "requests,ai_search,services,jobs,database,advanced,users,profile,logs",
+        "visible_tabs": "requests,ai_search,swipe,services,jobs,database,advanced,users,profile,logs",
     }
 
 
