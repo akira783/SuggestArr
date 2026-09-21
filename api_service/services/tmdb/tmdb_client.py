@@ -790,6 +790,68 @@ class TMDbClient(BaseHTTPClient):
 
         return False, None
 
+    async def get_streaming_availability(self, content_id, content_type, region):
+        """
+        Lists the subscription (flatrate) services streaming a title in one region.
+
+        Unlike ``get_watch_providers``, which only answers "is it on an excluded
+        service?", this returns every provider so the UI can show where a title is
+        already available.
+
+        :param content_id: The TMDb ID of the movie or TV show.
+        :param content_type: 'movie' or 'tv'.
+        :param region: ISO 3166-1 country code (e.g. 'FR').
+        :return: dict with 'region', 'providers' (list of {'id', 'name', 'logo_path'},
+                 TMDb display order) and 'link' (TMDb watch page), or None when the
+                 region is missing, the title is not streamed there, or on error.
+        """
+        if not region:
+            return None
+        url = f"{self.tmdb_api_url}/{content_type}/{content_id}/watch/providers?api_key={self.api_key}"
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
+                if response.status not in HTTP_OK:
+                    self.logger.warning("Failed to retrieve streaming availability for %s %s: %d",
+                                        content_type, content_id, response.status)
+                    return None
+                data = await response.json()
+        except aiohttp.ClientError as e:
+            self.logger.warning("Error fetching streaming availability: %s",
+                                str(e).replace(self.api_key, "***"))
+            return None
+
+        region_data = (data.get('results') or {}).get(region.upper()) or {}
+        flatrate = sorted(region_data.get('flatrate') or [],
+                          key=lambda provider: provider.get('display_priority', 999))
+        if not flatrate:
+            return None
+        return {
+            'region': region.upper(),
+            'providers': [
+                {
+                    'id': provider.get('provider_id'),
+                    'name': provider.get('provider_name'),
+                    'logo_path': (f"https://image.tmdb.org/t/p/w92{provider['logo_path']}"
+                                  if provider.get('logo_path') else None),
+                }
+                for provider in flatrate
+            ],
+            'link': region_data.get('link'),
+        }
+
+    async def get_imdb_id(self, content_id, content_type):
+        """
+        Returns the IMDB ID of a movie or TV show, or None if TMDb has none.
+
+        :param content_id: The TMDb ID of the content item.
+        :param content_type: 'movie' or 'tv'.
+        """
+        if content_type == 'tv':
+            return await self._get_tv_imdb_id(content_id)
+        details = await self._get_item_details(content_id, content_type)
+        return (details or {}).get('imdb_id')
+
     async def search_movie(self, title, year=None):
         """
         Search for a movie by title and optionally release year.

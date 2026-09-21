@@ -118,3 +118,56 @@ class OmdbClient(BaseHTTPClient):
             self.logger.error("OMDb request error for IMDB ID %s: %s", imdb_id, str(e))
 
         return None
+
+    async def get_ratings(self, imdb_id):
+        """
+        Fetch every rating OMDb aggregates for a title, for display.
+
+        Args:
+            imdb_id (str): IMDB ID in tt... format.
+
+        Returns:
+            dict | None: {'imdb_rating': float|None, 'imdb_votes': int|None,
+                          'rotten_tomatoes': int|None (percent),
+                          'metascore': int|None}, or None if OMDb has no entry
+                          or the request fails.
+        """
+        if not imdb_id or not self.api_key:
+            return None
+
+        url = f"{self.base_url}?i={imdb_id}&apikey={self.api_key}"
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
+                if response.status not in HTTP_OK:
+                    self.logger.warning("OMDb request failed for IMDB ID %s: HTTP %d",
+                                        imdb_id, response.status)
+                    return None
+                data = await response.json()
+        except aiohttp.ClientError as e:
+            self.logger.error("OMDb request error for IMDB ID %s: %s", imdb_id, str(e))
+            return None
+
+        if data.get('Response') == 'False':
+            return None
+
+        rotten_tomatoes = None
+        for rating in data.get('Ratings') or []:
+            if rating.get('Source') == 'Rotten Tomatoes':
+                rotten_tomatoes = self._parse_number(str(rating.get('Value', '')).rstrip('%'), int)
+        return {
+            'imdb_rating': self._parse_number(data.get('imdbRating'), float),
+            'imdb_votes': self._parse_number(str(data.get('imdbVotes', '')).replace(',', ''), int),
+            'rotten_tomatoes': rotten_tomatoes,
+            'metascore': self._parse_number(data.get('Metascore'), int),
+        }
+
+    @staticmethod
+    def _parse_number(raw, cast):
+        """Convert an OMDb field ('N/A', '', '7.8', '1,234') to a number or None."""
+        if raw in (None, '', 'N/A'):
+            return None
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return None

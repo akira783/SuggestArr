@@ -313,6 +313,138 @@ class JellyfinClient(BaseHTTPClient):
             )
             return None
 
+    async def get_engagement_items(self, user):
+        """
+        Retrieves how much a user engaged with each movie and series, not only what is
+        fully played.
+
+        ``get_recent_items`` only sees items flagged as played, which misses series the
+        user started and dropped, films stopped halfway, and re-watches. This method
+        combines three user-scoped queries per library:
+
+        - movies and series with their user data (play count, progress, unplayed
+          episode count),
+        - played episodes, aggregated per series,
+        - the resume list (items currently in progress).
+
+        :param user: Dict with 'id' and 'name' keys for the target user.
+        :return: List of dicts with ``title``, ``year``, ``media_type`` ('movie'|'tv'),
+            ``tmdb_id``, ``genres``, ``play_count``, ``played``, ``progress_pct``,
+            ``last_played`` (ISO string or None), ``episodes_watched``,
+            ``episodes_total`` and ``in_progress``. Items the user never touched are
+            left out. Returns an empty list on errors.
+        """
+        user_id = user['id']
+        user_name = user.get('name', user_id)
+        libraries = self.libraries or [{'id': None, 'name': 'all'}]
+        items_url = f"{self.api_url}/Users/{user_id}/Items"
+
+        titles = {}
+        episodes = {}
+        for library in libraries:
+            library_params = {'ParentId': library['id']} if library.get('id') else {}
+            base_params = {
+                'Recursive': 'true',
+                'EnableUserData': 'true',
+                'Limit': 5000,
+                **library_params,
+            }
+            for item in await self._get_items(items_url, {
+                **base_params,
+                'IncludeItemTypes': 'Movie,Series',
+                'Fields': 'ProviderIds,Genres,ProductionYear',
+            }, user_name):
+                titles[item.get('Id')] = item
+            for episode in await self._get_items(items_url, {
+                **base_params,
+                'IncludeItemTypes': 'Episode',
+                'IsPlayed': 'true',
+            }, user_name):
+                series_id = episode.get('SeriesId')
+                if not series_id:
+                    continue
+                stats = episodes.setdefault(series_id, {'count': 0, 'last_played': None})
+                stats['count'] += 1
+                stats['last_played'] = self._latest_date(
+                    stats['last_played'], (episode.get('UserData') or {}).get('LastPlayedDate')
+                )
+
+        resume = {}
+        for item in await self._get_items(
+            f"{items_url}/Resume", {'Limit': 200, 'EnableUserData': 'true'}, user_name
+        ):
+            key = item.get('SeriesId') if item.get('Type') == 'Episode' else item.get('Id')
+            user_data = item.get('UserData') or {}
+            resume[key] = {
+                'progress_pct': user_data.get('PlayedPercentage'),
+                'last_played': user_data.get('LastPlayedDate'),
+            }
+
+        results = []
+        for item_id, item in titles.items():
+            user_data = item.get('UserData') or {}
+            is_series = item.get('Type') == 'Series'
+            watched = episodes.get(item_id, {}).get('count', 0) if is_series else None
+            resumed = resume.get(item_id)
+            play_count = int(user_data.get('PlayCount') or 0)
+            played = bool(user_data.get('Played'))
+            progress = (resumed or {}).get('progress_pct')
+            if progress is None and not is_series:
+                progress = user_data.get('PlayedPercentage')
+            if not (watched or resumed or play_count or played or progress):
+                continue
+            last_played = self._latest_date(
+                user_data.get('LastPlayedDate'),
+                episodes.get(item_id, {}).get('last_played'),
+                (resumed or {}).get('last_played'),
+            )
+            episodes_total = None
+            if is_series and user_data.get('UnplayedItemCount') is not None:
+                episodes_total = watched + int(user_data['UnplayedItemCount'])
+            results.append({
+                'title': item.get('Name'),
+                'year': item.get('ProductionYear'),
+                'media_type': 'tv' if is_series else 'movie',
+                'tmdb_id': (item.get('ProviderIds') or {}).get('Tmdb'),
+                'genres': item.get('Genres') or [],
+                'play_count': play_count,
+                'played': played,
+                'progress_pct': round(progress) if progress is not None else None,
+                'last_played': last_played,
+                'episodes_watched': watched,
+                'episodes_total': episodes_total,
+                'in_progress': resumed is not None,
+            })
+
+        self.logger.info(
+            "Retrieved engagement for %d titles for user %s", len(results), user_name
+        )
+        return results
+
+    async def _get_items(self, url, params, user_name):
+        """GET a Jellyfin item list and return its 'Items', or [] on any failure."""
+        try:
+            session = await self._get_session()
+            async with session.get(url, headers=self.headers, params=params,
+                                   timeout=self.REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('Items', []) if isinstance(data, dict) else []
+                self.logger.warning(
+                    "Engagement query failed for user %s: HTTP %d (%s)",
+                    user_name, response.status, url,
+                )
+        except aiohttp.ClientError as e:
+            self.logger.warning("Engagement query error for user %s: %s", user_name, str(e))
+        return []
+
+    @staticmethod
+    def _latest_date(*values):
+        """Return the most recent of several ISO-8601 date strings, ignoring None."""
+        dates = [value for value in values if value]
+        # Jellyfin returns fixed-width UTC timestamps, so string order is date order.
+        return max(dates) if dates else None
+
     async def get_series_provider_ids(self, series_id):
         """
         Retrieves provider IDs from a parent series item.
