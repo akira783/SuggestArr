@@ -7,7 +7,7 @@ trigger a ``ValidationError``, which causes the retry mechanism in
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -124,3 +124,35 @@ class SearchResultRationaleList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rationales: list[SearchResultRationaleItem]
+
+
+# ---------------------------------------------------------------------------
+# Swipe (one-card-at-a-time recommendations) schemas
+# ---------------------------------------------------------------------------
+
+class SwipeCardSuggestion(BaseModel):
+    """One card proposed by the LLM for the Swipe feed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    year: Optional[int] = None
+    media_type: Literal["movie", "tv"]
+    rationale: str
+    pick_type: Literal["safe", "explore", "calibration"]
+
+
+class SwipeBatch(BaseModel):
+    """Top-level wrapper for a batch of Swipe cards."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cards: list[SwipeCardSuggestion]
+
+
+class TasteProfile(BaseModel):
+    """The user's taste profile, rewritten by the LLM from their votes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_text: str

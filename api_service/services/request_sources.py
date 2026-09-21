@@ -2,10 +2,12 @@
 
 DISCOVER_SOURCE = "discover"
 TRAKT_RECOMMENDATIONS_SOURCE = "trakt_recommendations"
+SWIPE_SOURCE = "swipe"
 
 REQUEST_SOURCE_LABELS = {
     DISCOVER_SOURCE: "Discover",
     TRAKT_RECOMMENDATIONS_SOURCE: "Trakt Recommendations",
+    SWIPE_SOURCE: "Swipe",
 }
 
 

@@ -74,7 +74,7 @@ Les deux premiers sont calculables depuis `swipe_votes` (pas de télémétrie ex
 |---|---|---|
 | **Jellyfin / Emby / Plex — engagement** | Au-delà des titres `IsPlayed` (seul signal actuel, `jellyfin_client.py:157`) : **nombre d'épisodes vus par série**, **éléments en cours** (`/Items/Resume`, % de progression), nombre de lectures. Donne au LLM « très suivi / commencé puis abandonné / revu plusieurs fois ». Nouvelle méthode `get_engagement_summary(user)` côté client média, implémentée d'abord pour Jellyfin (et Emby, même API), Plex en v2 | **v1** |
 | **TMDb — plateformes** | `watch/providers` pour la région configurée → badge sur la carte et mention dans la modale. Réutilise la logique de `tmdb_client.get_watch_providers` (`:718`), qui aujourd'hui ne sert qu'à exclure | **v1** |
-| **Seerr — demandes passées** | Titres déjà demandés (données déjà récupérées par `SeerClient`) : exclusion + signal d'intention positif dans le prompt | **v1** |
+| **Seerr — demandes passées** | Titres déjà demandés : **exclusion uniquement** (par id). Pas de signal d'intention dans le prompt : les demandes importées de Seerr n'ont ni titre ni utilisateur rattaché (constaté sur une vraie base : 83 demandes, aucune avec `user_id`) | **v1** |
 | **OMDb** | Notes IMDb / Rotten Tomatoes sur la carte, si configuré | **v1** (si configuré) |
 | **Trakt** | Historique et notes de l'utilisateur lié, si configuré | v2 |
 | **Recherche web (SearXNG)** | Sorties récentes postérieures aux connaissances du modèle (`_get_web_search_context`) | v2 (coût en latence) |
@@ -207,3 +207,21 @@ Limites de débit comme l'AI Search (`@limiter.limit`). Onglet `swipe` ajouté �
 Trakt et recherche web comme sources (v2) ; engagement Plex (v2) ; repli sans IA ; bande-annonce sur la carte ; choix du profil qualité dans la modale de demande
 (`ApprovalProfileChoice.vue` réutilisable plus tard) ; correction du `tvdbId = tmdb_id` de
 `/api/ai-search/request` (bug upstream à signaler séparément).
+
+## Décisions prises pendant l'implémentation
+
+- **Nom interne `swipe`** (voir l'encadré en tête) ; source de demande `swipe`.
+- **Historique d'un compte** : profils média liés et vérifiés ; un admin sans lien retombe sur
+  les utilisateurs sélectionnés dans la config de l'instance ; tout autre compte sans lien n'a
+  pas d'historique (jamais celui d'un autre).
+- **PlayCount non fiable** (lecture debrid : chaque relance compte) → jamais utilisé comme
+  signal de revisionnage.
+- **Une série n'est « abandonnée »** que si peu d'épisodes ont été vus (≤ 5), pas sur la seule
+  durée de pause.
+- **Le premier profil est facultatif pour un lot** : s'il échoue, le lot part sans profil.
+- **Préchargement** dans un thread avec sa propre boucle asyncio (Flask exécute chaque vue async
+  dans une boucle éphémère) ; un seul préchargement à la fois par (compte, type, envie, mode).
+- **Genres dans le prompt + poids des preuves** : sans genres, le LLM prenait un documentaire
+  pour de l'action ; un film vu une fois est un signal faible.
+- Réponse de `/api/swipe/request` : champ `request_status` (`awaiting_approval`, `queued`,
+  `already_requested`), distinct du `status` générique des réponses.

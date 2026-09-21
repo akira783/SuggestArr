@@ -9,6 +9,9 @@ blocks a batch of cards: it is logged as a warning and simply left out.
 """
 
 import asyncio
+import json
+import threading
+import time
 
 from api_service.config.logger_manager import LoggerManager
 from api_service.services.swipe.engagement import summarize_engagement
@@ -16,6 +19,11 @@ from api_service.services.swipe.engagement import summarize_engagement
 logger = LoggerManager.get_logger("SwipeSignals")
 
 ENRICH_CONCURRENCY = 5
+LIBRARY_CACHE_SECONDS = 600
+
+# Library contents change rarely and listing them costs a full scan: cache per process.
+_library_cache = {'key': None, 'keys': frozenset(), 'at': 0.0}
+_library_lock = threading.Lock()
 
 
 class SwipeSignals:
@@ -76,6 +84,43 @@ class SwipeSignals:
             logger.warning("Engagement signal unavailable: %s", exc)
             return []
         return summarize_engagement(items, limit=limit)
+
+    async def library_keys(self):
+        """``(tmdb_id, media_type)`` pairs already in the media library.
+
+        Used to keep cards to titles the user does not have yet. Cached for
+        ``LIBRARY_CACHE_SECONDS``; empty when the media server is not Jellyfin/Emby,
+        not configured, or unreachable.
+        """
+        service = str(self.config.get('SELECTED_SERVICE') or '').lower()
+        api_url, token = self.config.get('JELLYFIN_API_URL'), self.config.get('JELLYFIN_TOKEN')
+        if service not in ('jellyfin', 'emby') or not api_url or not token:
+            return set()
+        libraries = self.config.get('JELLYFIN_LIBRARIES')
+        libraries = libraries if isinstance(libraries, list) and libraries else None
+        cache_key = (api_url, json.dumps(libraries, sort_keys=True, default=str))
+        with _library_lock:
+            if (_library_cache['key'] == cache_key
+                    and time.monotonic() - _library_cache['at'] < LIBRARY_CACHE_SECONDS):
+                return set(_library_cache['keys'])
+
+        from api_service.services.jellyfin.jellyfin_client import JellyfinClient
+        client = JellyfinClient(api_url=api_url, token=token, library_ids=libraries)
+        try:
+            async with client:
+                items = await client.get_all_library_items() or {}
+        except Exception as exc:
+            logger.warning("Library contents unavailable: %s", exc)
+            return set()
+        keys = frozenset(
+            (str(item['tmdb_id']), media_type)
+            for media_type in ('movie', 'tv')
+            for item in items.get(media_type, [])
+            if item.get('tmdb_id')
+        )
+        with _library_lock:
+            _library_cache.update(key=cache_key, keys=keys, at=time.monotonic())
+        return set(keys)
 
     async def enrich_cards(self, cards):
         """Add streaming availability and external ratings to cards, in place.

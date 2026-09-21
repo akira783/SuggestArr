@@ -24,7 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from api_service.config.logger_manager import LoggerManager
 from api_service.observability.metrics import integration_error
-from api_service.exceptions.api_exceptions import LLMValidationError
+from api_service.exceptions.api_exceptions import LLMNotConfiguredError, LLMValidationError
 from api_service.services.config_service import ConfigService
 from api_service.services.llm.schemas import (
     DiscoverParams,
@@ -32,6 +32,8 @@ from api_service.services.llm.schemas import (
     SearchResultRationaleList,
     SearchQueryInterpretation,
     SuggestedTitle,
+    SwipeBatch,
+    TasteProfile,
 )
 
 logger = LoggerManager.get_logger("LLMService")
@@ -1047,3 +1049,270 @@ async def generate_search_result_rationales(
         return {}
     finally:
         await _close_llm_client(client)
+
+
+# ---------------------------------------------------------------------------
+# Swipe: one-card-at-a-time recommendations and the taste profile
+# ---------------------------------------------------------------------------
+
+SWIPE_PROFILE_MAX_CHARS = 1500
+
+_SWIPE_VOTE_LABELS = {
+    "like": "LIKED",
+    "dislike": "DISLIKED",
+    "seen_liked": "already seen, LIKED it",
+    "seen_disliked": "already seen, DISLIKED it",
+}
+
+_ENGAGEMENT_LABELS = {
+    "rewatched": "watched several times",
+    "completed": "watched to the end",
+    "watched": "watched",
+    "in_progress": "currently watching",
+    "partially_watched": "watched part of it, paused",
+    "abandoned": "started, then dropped",
+}
+
+
+def _swipe_title_line(item: Dict[str, Any]) -> str:
+    media = "TV" if item.get("media_type") == "tv" else "movie"
+    year = item.get("year")
+    return f"{item.get('title')} ({media}{', ' + str(year) if year else ''})"
+
+
+def _swipe_votes_text(votes: List[Dict[str, Any]]) -> str:
+    lines = []
+    for vote in votes:
+        label = _SWIPE_VOTE_LABELS.get(vote.get("vote"), vote.get("vote"))
+        extra = " [adventurous pick]" if vote.get("pick_type") == "explore" else ""
+        lines.append(f"- {_swipe_title_line(vote)}: {label}{extra}")
+    return "\n".join(lines)
+
+
+def _swipe_engagement_text(engagement: List[Dict[str, Any]]) -> str:
+    lines = []
+    for item in engagement:
+        genres = item.get("genres") or []
+        genre_text = f" [{', '.join(genres[:3])}]" if genres else ""
+        lines.append(
+            f"- {_swipe_title_line(item)}{genre_text}: "
+            f"{_ENGAGEMENT_LABELS.get(item.get('engagement'), item.get('engagement'))}"
+            f" ({item.get('detail')})"
+        )
+    return "\n".join(lines)
+
+
+_ENGAGEMENT_WEIGHT_NOTE = (
+    "Weigh this evidence by effort: many episodes of a series or a title watched to the "
+    "end is strong; a single film watched once is weak (it may have been casual); a "
+    "series started then dropped is a mild negative. Use the genres in brackets, not "
+    "guesses, to tell documentaries from fiction."
+)
+
+
+def build_swipe_batch_prompt(
+    *,
+    count: int,
+    media_type: str,
+    mode: str,
+    explore_ratio: float = 0.3,
+    profile_text: Optional[str] = None,
+    engagement: Optional[List[Dict[str, Any]]] = None,
+    recent_votes: Optional[List[Dict[str, Any]]] = None,
+    exclude_titles: Optional[List[Dict[str, Any]]] = None,
+    mood: Optional[str] = None,
+    language: str = "en",
+) -> str:
+    """Build the user prompt asking the LLM for one batch of Swipe cards.
+
+    :param count: Number of cards to ask for.
+    :param media_type: 'movie', 'tv' or 'both'.
+    :param mode: 'normal' (safe/explore mix around the profile) or 'calibration'
+        (very well-known, contrasting titles to bootstrap a new profile).
+    :param explore_ratio: Share of 'explore' picks in normal mode.
+    :param profile_text: The user's taste profile, if any.
+    :param engagement: Output of ``summarize_engagement`` (media-server evidence).
+    :param recent_votes: Most recent votes, newest first.
+    :param exclude_titles: Further titles that must not be proposed.
+    :param mood: Optional free-text wish for this session ("sci-fi tonight").
+    :param language: ISO 639-1 code for the rationales.
+    :return: Prompt text.
+    """
+    if media_type == "movie":
+        what = "movies"
+    elif media_type == "tv":
+        what = "TV shows"
+    else:
+        what = "movies and TV shows (roughly half of each)"
+
+    sections = []
+    if profile_text:
+        sections.append(f"TASTE PROFILE (maintained from the user's votes):\n{profile_text}")
+    if engagement:
+        sections.append(
+            "WHAT THE USER ACTUALLY WATCHED on their media server (strongest signals first):\n"
+            + _swipe_engagement_text(engagement) + "\n" + _ENGAGEMENT_WEIGHT_NOTE
+        )
+    if recent_votes:
+        sections.append("RECENT VOTES on previous cards (newest first):\n" + _swipe_votes_text(recent_votes))
+    if mood:
+        sections.append(f'WHAT THE USER FEELS LIKE RIGHT NOW: "{mood}"')
+
+    if mode == "calibration":
+        picking = (
+            f"The user is new, so this batch calibrates their profile. Pick {count} VERY "
+            f"well-known {what} that most people have seen or heard of: big hits and "
+            "classics from different decades, deliberately spread across contrasting "
+            "genres, tones and countries, so each answer reveals something new. "
+            'Set pick_type to "calibration" for every card.'
+        )
+    else:
+        explore = max(1, round(count * explore_ratio))
+        picking = (
+            f"Pick {count} {what}: about {count - explore} SAFE picks squarely matching the "
+            f"profile (pick_type \"safe\") and about {explore} ADVENTUROUS picks "
+            "(pick_type \"explore\"): a neighbouring genre, another country or era, still "
+            "plausible for this user but a stretch. Weigh votes on adventurous picks "
+            "heavily: a liked one widens the taste, a disliked one marks a boundary."
+        )
+
+    never = [
+        "anything listed above as watched or voted on",
+    ]
+    if exclude_titles:
+        never.append(
+            "these titles: " + "; ".join(_swipe_title_line(t) for t in exclude_titles)
+        )
+
+    context = "\n\n".join(sections) if sections else "No history yet."
+    return f"""You choose recommendation cards for a personal media server. Cards are shown one at a time; the user answers like, dislike, or "already seen" (liked / disliked).
+
+{context}
+
+{picking}
+
+Never propose {'; never propose '.join(never)}.
+
+Rules:
+- Only real {what} that exist on TMDB; give the exact TMDB title and the release year (first air year for TV).
+- media_type is "movie" or "tv".
+- rationale: ONE short sentence written to the user ("you"), in the language with ISO code "{language}", citing concrete evidence (a title they liked or watched, a stated preference). For adventurous picks, say why the stretch is worth it.
+- No duplicates. Vary genres within the batch.
+
+Return ONLY a JSON object: {{"cards": [{{"title": "...", "year": 2021, "media_type": "movie", "rationale": "...", "pick_type": "safe"}}]}}"""
+
+
+def build_taste_profile_prompt(
+    *,
+    current_profile: Optional[str],
+    user_edited: bool,
+    new_votes: Optional[List[Dict[str, Any]]] = None,
+    engagement: Optional[List[Dict[str, Any]]] = None,
+    language: str = "en",
+) -> str:
+    """Build the prompt asking the LLM to write or revise the taste profile.
+
+    :param current_profile: Existing profile text, or None to write the first one.
+    :param user_edited: True when the user corrected the profile by hand; the LLM
+        must then keep every statement the user wrote.
+    :param new_votes: Votes cast since the last revision, newest first.
+    :param engagement: Output of ``summarize_engagement``.
+    :param language: ISO 639-1 code the profile is written in.
+    :return: Prompt text.
+    """
+    sections = []
+    if current_profile:
+        header = "CURRENT PROFILE"
+        if user_edited:
+            header += (
+                " (the user corrected it by hand: every statement below is ground truth; "
+                "you may add nuances from the new evidence but never contradict, weaken or "
+                "remove what is written)"
+            )
+        sections.append(f"{header}:\n{current_profile}")
+    if new_votes:
+        sections.append(
+            "NEW VOTES since the last revision (newest first; adventurous picks weigh more):\n"
+            + _swipe_votes_text(new_votes)
+        )
+    if engagement:
+        sections.append(
+            "WHAT THE USER ACTUALLY WATCHED (strongest signals first):\n"
+            + _swipe_engagement_text(engagement) + "\n" + _ENGAGEMENT_WEIGHT_NOTE
+        )
+    task = "Revise" if current_profile else "Write"
+    context = "\n\n".join(sections) if sections else "No evidence yet."
+    return f"""{task} a concise taste profile of this user, used to pick movies and TV shows for them.
+
+{context}
+
+Rules:
+- Write in the language with ISO code "{language}", at most {SWIPE_PROFILE_MAX_CHARS} characters.
+- Three short parts: what they love, what they avoid, nuances (e.g. prefers self-contained episodes, drops long slow series).
+- State only what the evidence supports; cite example titles sparingly.
+- Dropped series and disliked cards are evidence too.
+
+Return ONLY a JSON object: {{"profile_text": "..."}}"""
+
+
+async def _swipe_llm_call(prompt: str, schema_cls, user_id: Optional[int], system: str):
+    client = get_llm_client(user_id)
+    if not client:
+        raise LLMNotConfiguredError("LLM is not configured.")
+    try:
+        config = ConfigService.get_runtime_config()
+        model = config.get("LLM_MODEL", "gpt-4o-mini")
+        max_retries = int(config.get("LLM_MAX_RETRIES", 2))
+        generation_settings = _resolve_generation_settings(config, model, legacy_temperature=0.8)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        return await _call_with_validation(
+            client=client,
+            model=model,
+            messages=messages,
+            schema_cls=schema_cls,
+            **generation_settings,
+            max_retries=max_retries,
+        )
+    finally:
+        await _close_llm_client(client)
+
+
+async def generate_swipe_batch(user_id: Optional[int] = None, **prompt_kwargs) -> List[Dict[str, Any]]:
+    """Ask the LLM for one batch of Swipe cards.
+
+    :param user_id: SuggestArr account id, so a per-user LLM configuration is used.
+    :param prompt_kwargs: Arguments of :func:`build_swipe_batch_prompt`.
+    :raises LLMNotConfiguredError: When no LLM provider is configured.
+    :raises LLMValidationError: When the LLM keeps returning invalid JSON.
+    :return: List of dicts with title, year, media_type, rationale and pick_type.
+    """
+    prompt = build_swipe_batch_prompt(**prompt_kwargs)
+    logger.info(
+        "Requesting %s swipe cards (mode=%s, media_type=%s)",
+        prompt_kwargs.get("count"), prompt_kwargs.get("mode"), prompt_kwargs.get("media_type"),
+    )
+    batch: SwipeBatch = await _swipe_llm_call(
+        prompt, SwipeBatch, user_id,
+        "You pick movies and TV shows for a recommendation feed and only output raw JSON objects.",
+    )
+    return [card.model_dump() for card in batch.cards]
+
+
+async def update_taste_profile(user_id: Optional[int] = None, **prompt_kwargs) -> str:
+    """Ask the LLM to write or revise the user's taste profile.
+
+    :param user_id: SuggestArr account id, so a per-user LLM configuration is used.
+    :param prompt_kwargs: Arguments of :func:`build_taste_profile_prompt`.
+    :raises LLMNotConfiguredError: When no LLM provider is configured.
+    :raises LLMValidationError: When the LLM keeps returning invalid JSON.
+    :return: The profile text, trimmed to ``SWIPE_PROFILE_MAX_CHARS``.
+    """
+    prompt = build_taste_profile_prompt(**prompt_kwargs)
+    profile: TasteProfile = await _swipe_llm_call(
+        prompt, TasteProfile, user_id,
+        "You summarise a person's movie and TV taste and only output raw JSON objects.",
+    )
+    return profile.profile_text.strip()[:SWIPE_PROFILE_MAX_CHARS]

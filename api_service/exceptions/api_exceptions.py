@@ -64,3 +64,6 @@ class SeerClientError(APIClientError):
 
 class LLMValidationError(Exception):
     """Raised when the LLM response fails Pydantic validation after all retries."""
+
+class LLMNotConfiguredError(Exception):
+    """Raised when a feature needs the LLM but no provider is configured."""
