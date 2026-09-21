@@ -338,6 +338,36 @@ class SchemaManager:
                     FOREIGN KEY (media_user_identity_id) REFERENCES media_user_identities(id) ON DELETE CASCADE,
                     UNIQUE (media_user_identity_id, source_type, source_key)
                 )
+            """,
+            # Discover: per-user card votes, kept apart from the global AI Search feedback.
+            'discover_votes': """
+                CREATE TABLE IF NOT EXISTS discover_votes (
+                    user_id INTEGER NOT NULL,
+                    tmdb_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    vote TEXT NOT NULL,
+                    title TEXT,
+                    year INTEGER,
+                    genres TEXT,
+                    rationale TEXT,
+                    pick_type TEXT,
+                    requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, tmdb_id, media_type),
+                    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                )
+            """,
+            # Discover: one LLM-maintained taste profile per user.
+            'discover_taste_profile': """
+                CREATE TABLE IF NOT EXISTS discover_taste_profile (
+                    user_id INTEGER PRIMARY KEY,
+                    profile_text TEXT NOT NULL,
+                    votes_since_update INTEGER NOT NULL DEFAULT 0,
+                    user_edited INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                )
             """
         }
         
@@ -546,6 +576,38 @@ class SchemaManager:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         PRIMARY KEY (user_id, media_user_id, tmdb_id, media_type),
+                        FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB
+                """
+            elif table_name == 'discover_votes':
+                # Returned as-is: the generic TEXT -> VARCHAR(512) rewrite below
+                # would truncate rationales.
+                return """
+                    CREATE TABLE IF NOT EXISTS discover_votes (
+                        user_id INT NOT NULL,
+                        tmdb_id VARCHAR(32) NOT NULL,
+                        media_type VARCHAR(16) NOT NULL,
+                        vote VARCHAR(16) NOT NULL,
+                        title VARCHAR(512),
+                        year INT,
+                        genres TEXT,
+                        rationale TEXT,
+                        pick_type VARCHAR(16),
+                        requested TINYINT(1) NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_id, tmdb_id, media_type),
+                        FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB
+                """
+            elif table_name == 'discover_taste_profile':
+                return """
+                    CREATE TABLE IF NOT EXISTS discover_taste_profile (
+                        user_id INT PRIMARY KEY,
+                        profile_text TEXT NOT NULL,
+                        votes_since_update INT NOT NULL DEFAULT 0,
+                        user_edited TINYINT(1) NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB
                 """
