@@ -339,9 +339,9 @@ class SchemaManager:
                     UNIQUE (media_user_identity_id, source_type, source_key)
                 )
             """,
-            # Discover: per-user card votes, kept apart from the global AI Search feedback.
-            'discover_votes': """
-                CREATE TABLE IF NOT EXISTS discover_votes (
+            # Swipe: per-user card votes, kept apart from the global AI Search feedback.
+            'swipe_votes': """
+                CREATE TABLE IF NOT EXISTS swipe_votes (
                     user_id INTEGER NOT NULL,
                     tmdb_id TEXT NOT NULL,
                     media_type TEXT NOT NULL,
@@ -358,9 +358,9 @@ class SchemaManager:
                     FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                 )
             """,
-            # Discover: one LLM-maintained taste profile per user.
-            'discover_taste_profile': """
-                CREATE TABLE IF NOT EXISTS discover_taste_profile (
+            # Swipe: one LLM-maintained taste profile per user.
+            'swipe_taste_profile': """
+                CREATE TABLE IF NOT EXISTS swipe_taste_profile (
                     user_id INTEGER PRIMARY KEY,
                     profile_text TEXT NOT NULL,
                     votes_since_update INTEGER NOT NULL DEFAULT 0,
@@ -579,11 +579,11 @@ class SchemaManager:
                         FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB
                 """
-            elif table_name == 'discover_votes':
+            elif table_name == 'swipe_votes':
                 # Returned as-is: the generic TEXT -> VARCHAR(512) rewrite below
                 # would truncate rationales.
                 return """
-                    CREATE TABLE IF NOT EXISTS discover_votes (
+                    CREATE TABLE IF NOT EXISTS swipe_votes (
                         user_id INT NOT NULL,
                         tmdb_id VARCHAR(32) NOT NULL,
                         media_type VARCHAR(16) NOT NULL,
@@ -600,9 +600,9 @@ class SchemaManager:
                         FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB
                 """
-            elif table_name == 'discover_taste_profile':
+            elif table_name == 'swipe_taste_profile':
                 return """
-                    CREATE TABLE IF NOT EXISTS discover_taste_profile (
+                    CREATE TABLE IF NOT EXISTS swipe_taste_profile (
                         user_id INT PRIMARY KEY,
                         profile_text TEXT NOT NULL,
                         votes_since_update INT NOT NULL DEFAULT 0,

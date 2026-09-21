@@ -25,7 +25,7 @@ sqlite3.register_converter(
 from api_service.db.components.ai_search_mixin import AiSearchMixin
 from api_service.db.components.auth_mixin import AuthMixin
 from api_service.db.components.cleanup_mixin import CleanupMixin
-from api_service.db.components.discover_mixin import DiscoverMixin
+from api_service.db.components.swipe_mixin import SwipeMixin
 from api_service.db.components.integration_mixin import IntegrationMixin
 from api_service.db.components.media_user_mixin import MediaUserMixin
 from api_service.db.components.metadata_mixin import MetadataMixin
@@ -37,7 +37,7 @@ from api_service.db.components.translation_mixin import TranslationMixin
 from api_service.db.components.webhook_mixin import WebhookMixin
 
 
-class DatabaseManager(IntegrationMixin, RequestMixin, MetadataMixin, RequestQueueMixin, SuggestionFeedbackMixin, TranslationMixin, AiSearchMixin, DiscoverMixin, CleanupMixin, AuthMixin, MediaUserMixin, WebhookMixin):
+class DatabaseManager(IntegrationMixin, RequestMixin, MetadataMixin, RequestQueueMixin, SuggestionFeedbackMixin, TranslationMixin, AiSearchMixin, SwipeMixin, CleanupMixin, AuthMixin, MediaUserMixin, WebhookMixin):
     """Singleton database manager with connection pooling."""
     
     _instance = None

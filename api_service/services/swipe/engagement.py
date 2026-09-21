@@ -1,4 +1,4 @@
-"""Turn raw media-server engagement data into taste signals for Discover prompts.
+"""Turn raw media-server engagement data into taste signals for Swipe prompts.
 
 The media clients report facts (episodes watched, progress, play count, last played);
 this module decides what they mean ("completed", "abandoned", ...) and which titles

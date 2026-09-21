@@ -1,4 +1,9 @@
-# Spec — mode « Découverte » (fork akira, base v2.15.0)
+# Spec — mode « Découverte » / Swipe (fork akira, base v2.15.0)
+
+> **Nommage (2026-09-21)** : « discover » est déjà pris dans SuggestArr (jobs `discover_jobs`,
+> source de demande `discover` libellée « Discover »). Le code interne utilise donc **`swipe`**
+> (tables `swipe_*`, `services/swipe/`, blueprint `/api/swipe`, source `swipe`). Le libellé affiché
+> dans l'interface reste à choisir à l'étape 4.
 
 Statut : brouillon v2 à valider — 2026-09-21 (v2 : signaux multi-connecteurs, badge plateforme,
 alternance sûr/exploration, mode Calibrage)
@@ -14,7 +19,7 @@ ses votes alimentent un **profil de goûts** maintenu par l'IA, qui oriente les 
 - **Conversion 👍 → demande**.
 - Temps d'affichage de la première carte < 2 s quand un lot est déjà préchargé.
 
-Les deux premiers sont calculables depuis `discover_votes` (pas de télémétrie externe).
+Les deux premiers sont calculables depuis `swipe_votes` (pas de télémétrie externe).
 
 ## Parcours utilisateur
 
@@ -22,7 +27,7 @@ Les deux premiers sont calculables depuis `discover_votes` (pas de télémétrie
    est composé de **titres très connus et variés** (grands succès récents et classiques, genres
    contrastés), pour que « Déjà vu — aimé / pas aimé » amorce le profil en quelques minutes.
    Bandeau « Calibrage : 7/15 », bouton « Passer le calibrage ». Relançable depuis le panneau profil.
-1. Onglet **Discover** du tableau de bord. En haut : Films / Séries / Les deux, et un champ
+1. Onglet dédié du tableau de bord (libellé à choisir). En haut : Films / Séries / Les deux, et un champ
    facultatif « envie du moment » (« SF ce soir »).
 2. Une carte : affiche, titre, année, genres, note TMDb (+ IMDb / Rotten Tomatoes si OMDb est
    configuré), résumé, **« Pourquoi pour toi »** (raison IA), un badge **« Pari »** sur les cartes
@@ -49,9 +54,9 @@ Les deux premiers sont calculables depuis `discover_votes` (pas de télémétrie
   `queue_context={'owner_id': user_id, 'delivery_mode': 'inherit'}` → `awaiting_approval` si
   `REQUIRE_REQUEST_APPROVAL`, sinon `queued`. On **n'utilise pas** `/api/ai-search/request`,
   qui poste directement à Seer sans approbation ni profils qualité.
-- **Source des demandes** : nouvelle valeur `discover`, déclarée dans `services/request_sources.py`
+- **Source des demandes** : nouvelle valeur `swipe`, déclarée dans `services/request_sources.py`
   et `services/tmdb/localization.py`, pour distinguer ces demandes dans Requests.
-- **L'IA est requise** pour Discover en v1 (sans LLM configuré : onglet affiché avec un message
+- **L'IA est requise** pour ce mode en v1 (sans LLM configuré : onglet affiché avec un message
   « configurez un fournisseur IA »). Repli TMDb « similaires aux likes » = piste v2.
 - **Les dislikes vont dans le prompt** (aujourd'hui l'AI Search ne les utilise qu'en exclusion par id).
 - **Alternance sûr / exploration** : chaque lot = ~70 % de cartes au cœur du profil, ~30 % de
@@ -78,7 +83,7 @@ Jellystat n'est pas un connecteur SuggestArr : il reste hors du fork.
 
 ## Profil de goûts (mémoire IA)
 
-- Table `discover_taste_profile` : un texte court (≤ ~1 500 caractères) structuré
+- Table `swipe_taste_profile` : un texte court (≤ ~1 500 caractères) structuré
   « aime / n'aime pas / nuances », + métadonnées.
 - **Création** : au premier usage, générée à partir de l'historique **et du résumé d'engagement**
   (sources de signal v1) de l'utilisateur (profils média liés → `user_ids`), puis affinée par le
@@ -88,15 +93,15 @@ Jellystat n'est pas un connecteur SuggestArr : il reste hors du fork.
   bloquer l'UI.
 - **Édition manuelle** : si l'utilisateur a modifié le texte, la mise à jour suivante reçoit la
   consigne « respecte les corrections de l'utilisateur, ne les contredis pas ».
-- Le profil est injecté dans chaque prompt de lot Discover, avec les 30 derniers votes.
+- Le profil est injecté dans chaque prompt de lot, avec les 30 derniers votes.
 
 ## Backend
 
 ### Tables (ajoutées dans `db/components/schema_manager.py` + branche MySQL dans `_prepare_create_table_query_for_db`)
 
 ```sql
--- discover_votes reçoit aussi pick_type TEXT (safe | explore | calibration)
-discover_votes(
+-- swipe_votes reçoit aussi pick_type TEXT (safe | explore | calibration)
+swipe_votes(
   user_id INTEGER NOT NULL,           -- auth_users.id
   tmdb_id TEXT NOT NULL,
   media_type TEXT NOT NULL,           -- movie | tv
@@ -108,7 +113,7 @@ discover_votes(
   PRIMARY KEY (user_id, tmdb_id, media_type)
 )
 
-discover_taste_profile(
+swipe_taste_profile(
   user_id INTEGER PRIMARY KEY,
   profile_text TEXT NOT NULL,
   votes_since_update INTEGER DEFAULT 0,
@@ -117,10 +122,10 @@ discover_taste_profile(
 )
 ```
 
-Accès via un nouveau `db/components/discover_mixin.py`, ajouté à `DatabaseManager`
+Accès via un nouveau `db/components/swipe_mixin.py`, ajouté à `DatabaseManager`
 (`db/database_manager.py:39`). Idiome placeholders `?`/`%s` des autres mixins.
 
-### Service `services/discover/discover_service.py`
+### Service `services/swipe/swipe_service.py`
 
 - `next_batch(user_id, media_type, mood=None, size=10)` :
   historique (réutilise `AiSearchService._get_history`) + résumé d'engagement, profil, 30 derniers
@@ -133,20 +138,20 @@ Accès via un nouveau `db/components/discover_mixin.py`, ajouté à `DatabaseMan
   d'onglet instantanée.
 - `vote(user_id, item, vote)` : upsert du vote, incrémente `votes_since_update`, déclenche
   `refresh_profile` au seuil.
-- `request(user_id, item)` : `SeerClient.request_media(..., source={'id': 'discover'})`, puis
+- `request(user_id, item)` : `SeerClient.request_media(..., source={'id': 'swipe'})`, puis
   `requested=1`.
 - `refresh_profile(user_id, force=False)`.
 
 ### LLM (`services/llm/llm_service.py` + `schemas.py`)
 
-- `generate_discover_batch(..., mode='normal'|'calibration', explore_ratio=0.3)` → schéma
-  `DiscoverBatch{items:[{title, year, media_type, rationale, pick_type}]}` (`pick_type` :
+- `generate_swipe_batch(..., mode='normal'|'calibration', explore_ratio=0.3)` → schéma
+  `SwipeBatch{items:[{title, year, media_type, rationale, pick_type}]}` (`pick_type` :
   `safe` | `explore`).
 - `update_taste_profile(current, votes, user_edited)` → schéma `TasteProfile{profile_text}`.
 - Passent par `_call_with_validation` ; `get_llm_client(user_id)` pour profiter de la config IA
   par utilisateur déjà supportée.
 
-### Routes — blueprint `blueprints/discover/routes.py`, préfixe `/api/discover`
+### Routes — blueprint `blueprints/swipe/routes.py`, préfixe `/api/swipe`
 
 | Méthode | Route | Rôle |
 |---|---|---|
@@ -157,19 +162,19 @@ Accès via un nouveau `db/components/discover_mixin.py`, ajouté à `DatabaseMan
 | POST | `/profile/refresh` | régénérer |
 | DELETE | `/votes` | réinitialiser ses votes |
 
-Limites de débit comme l'AI Search (`@limiter.limit`). Onglet `discover` ajouté à
+Limites de débit comme l'AI Search (`@limiter.limit`). Onglet `swipe` ajouté à
 `_VALID_VISIBLE_TABS` (`blueprints/users/routes.py:45`) et au défaut du mode bypass
 (`auth/middleware.py:317`).
 
 ## Frontend
 
-- `client/src/components/DiscoverPage.vue` (Options API, comme `AiSearchPage.vue`), onglet
+- `client/src/components/SwipePage.vue` (Options API, comme `AiSearchPage.vue`), onglet
   enregistré dans `DashboardPage.vue` (`tabs`, `componentMap`, imports).
 - Swipe fait main en pointer events (aucune lib ajoutée) : seuil ~30 % de largeur, rotation légère,
   retour élastique si relâché avant le seuil.
 - Modales en `teleport` + `modal-fade` sur les primitives `primitives/modal.css`.
-- Fonctions API dans `client/src/api/discoverApi.js`.
-- Styles `client/src/assets/styles/discoverPage.css` sur les tokens de `variables.css`.
+- Fonctions API dans `client/src/api/swipeApi.js`.
+- Styles `client/src/assets/styles/swipePage.css` sur les tokens de `variables.css`.
 
 ## Tests
 
@@ -182,7 +187,7 @@ Limites de débit comme l'AI Search (`@limiter.limit`). Onglet `discover` ajout�
 
 ## Déploiement (fork)
 
-- Image construite localement : `docker build -f docker/Dockerfile --target prod -t suggestarr-akira:2.15.0-discover.1 .`
+- Image construite localement : `docker build -f docker/Dockerfile --target prod -t suggestarr-akira:2.15.0-swipe.1 .`
 - Compose `/media/arr/suggestarr` : `image:` remplacée ; retour arrière = remettre
   `ciuse99/suggestarr:v2.15.0`. Migration **uniquement additive** (2 nouvelles tables) → retour
   arrière sans risque. Sauvegarde de `config_files/` avant le premier déploiement.
@@ -193,7 +198,7 @@ Limites de débit comme l'AI Search (`@limiter.limit`). Onglet `discover` ajout�
 1. Tables + mixin + tests.
 2. Sources de signal v1 : engagement Jellyfin/Emby, plateformes TMDb, OMDb facultatif + tests.
 3. Service (normal, Calibrage, sûr/exploration, préchargement) + prompts LLM + routes + tests.
-4. Page Discover (cartes, badges, swipe, modales, bandeau Calibrage).
+4. Page Swipe (cartes, badges, swipe, modales, bandeau Calibrage).
 5. Profil de goûts (panneau, édition, régénération).
 6. Build de l'image, déploiement, essai réel, lecture des indicateurs après ~100 votes.
 

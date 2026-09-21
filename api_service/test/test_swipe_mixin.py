@@ -3,18 +3,18 @@ import sqlite3
 
 import pytest
 
-from api_service.db.components.discover_mixin import DiscoverMixin
+from api_service.db.components.swipe_mixin import SwipeMixin
 from api_service.db.components.schema_manager import SchemaManager
 
 
-class DiscoverDb(DiscoverMixin):
+class SwipeDb(SwipeMixin):
     """In-memory SQLite database built from the real SchemaManager DDL."""
 
     db_type = 'sqlite'
 
     def __init__(self):
         self.connection = sqlite3.connect(':memory:')
-        self.logger = logging.getLogger('test_discover_mixin')
+        self.logger = logging.getLogger('test_swipe_mixin')
 
     def get_connection(self):
         return self.connection
@@ -22,7 +22,7 @@ class DiscoverDb(DiscoverMixin):
 
 @pytest.fixture
 def db():
-    database = DiscoverDb()
+    database = SwipeDb()
     SchemaManager(database).initialize_db()
     database.connection.execute("PRAGMA foreign_keys = ON")
     for user_id, username in ((1, 'akira'), (2, 'guest')):
@@ -35,7 +35,7 @@ def db():
 
 
 def _vote(db, user_id, tmdb_id, vote='like', media_type='movie', **extra):
-    return db.set_discover_vote(user_id, tmdb_id, media_type, vote, **extra)
+    return db.set_swipe_vote(user_id, tmdb_id, media_type, vote, **extra)
 
 
 def test_vote_round_trip_keeps_card_metadata(db):
@@ -43,7 +43,7 @@ def test_vote_round_trip_keeps_card_metadata(db):
                    rationale='Because you loved Blade Runner 2049', pick_type='safe')
 
     assert stored['tmdb_id'] == '438631'
-    [vote] = db.get_discover_votes(1)
+    [vote] = db.get_swipe_votes(1)
     assert vote['tmdb_id'] == '438631'
     assert vote['media_type'] == 'movie'
     assert vote['vote'] == 'like'
@@ -58,11 +58,11 @@ def test_vote_round_trip_keeps_card_metadata(db):
 
 def test_revote_replaces_vote_but_keeps_requested_flag(db):
     _vote(db, 1, 42, 'like')
-    assert db.mark_discover_requested(1, 42, 'movie') is True
+    assert db.mark_swipe_requested(1, 42, 'movie') is True
 
     _vote(db, 1, 42, 'seen_liked')
 
-    [vote] = db.get_discover_votes(1)
+    [vote] = db.get_swipe_votes(1)
     assert vote['vote'] == 'seen_liked'
     assert vote['requested'] is True
 
@@ -73,7 +73,7 @@ def test_revote_without_metadata_keeps_stored_card_details(db):
 
     _vote(db, 1, 42, 'seen_disliked')
 
-    [vote] = db.get_discover_votes(1)
+    [vote] = db.get_swipe_votes(1)
     assert vote['vote'] == 'seen_disliked'
     assert vote['title'] == 'Dune'
     assert vote['year'] == 2021
@@ -86,8 +86,8 @@ def test_same_tmdb_id_is_distinct_per_media_type(db):
     _vote(db, 1, 1399, 'like', media_type='tv')
     _vote(db, 1, 1399, 'dislike', media_type='movie')
 
-    assert db.get_discover_voted_ids(1) == {('1399', 'tv'), ('1399', 'movie')}
-    assert db.get_discover_voted_ids(1, media_type='tv') == {('1399', 'tv')}
+    assert db.get_swipe_voted_ids(1) == {('1399', 'tv'), ('1399', 'movie')}
+    assert db.get_swipe_voted_ids(1, media_type='tv') == {('1399', 'tv')}
 
 
 def test_votes_are_isolated_between_users(db):
@@ -95,11 +95,11 @@ def test_votes_are_isolated_between_users(db):
     _vote(db, 1, 2, 'dislike')
     _vote(db, 2, 3, 'like')
 
-    assert db.get_discover_voted_ids(1) == {('1', 'movie'), ('2', 'movie')}
-    assert db.get_discover_voted_ids(2) == {('3', 'movie')}
-    assert db.count_discover_votes(1) == 2
-    assert db.count_discover_votes(2) == 1
-    assert db.mark_discover_requested(2, 1, 'movie') is False
+    assert db.get_swipe_voted_ids(1) == {('1', 'movie'), ('2', 'movie')}
+    assert db.get_swipe_voted_ids(2) == {('3', 'movie')}
+    assert db.count_swipe_votes(1) == 2
+    assert db.count_swipe_votes(2) == 1
+    assert db.mark_swipe_requested(2, 1, 'movie') is False
 
 
 def test_get_votes_orders_newest_first_and_honours_limit(db):
@@ -109,11 +109,11 @@ def test_get_votes_orders_newest_first_and_honours_limit(db):
     for tmdb_id, stamp in ((10, '2026-09-21 10:00:00'), (20, '2026-09-21 12:00:00'),
                            (30, '2026-09-21 11:00:00')):
         db.connection.execute(
-            "UPDATE discover_votes SET updated_at=? WHERE tmdb_id=?", (stamp, str(tmdb_id)),
+            "UPDATE swipe_votes SET updated_at=? WHERE tmdb_id=?", (stamp, str(tmdb_id)),
         )
 
-    assert [v['tmdb_id'] for v in db.get_discover_votes(1)] == ['20', '30', '10']
-    assert [v['tmdb_id'] for v in db.get_discover_votes(1, limit=2)] == ['20', '30']
+    assert [v['tmdb_id'] for v in db.get_swipe_votes(1)] == ['20', '30', '10']
+    assert [v['tmdb_id'] for v in db.get_swipe_votes(1, limit=2)] == ['20', '30']
 
 
 def test_stats_compute_like_and_request_rates(db):
@@ -122,9 +122,9 @@ def test_stats_compute_like_and_request_rates(db):
     _vote(db, 1, 3, 'dislike', pick_type='explore')
     _vote(db, 1, 4, 'seen_liked', pick_type='calibration')
     _vote(db, 1, 5, 'seen_disliked', pick_type='calibration')
-    db.mark_discover_requested(1, 1, 'movie')
+    db.mark_swipe_requested(1, 1, 'movie')
 
-    stats = db.get_discover_stats(1)
+    stats = db.get_swipe_stats(1)
 
     assert stats['total'] == 5
     assert stats['likes'] == 3
@@ -138,7 +138,7 @@ def test_stats_compute_like_and_request_rates(db):
 
 
 def test_stats_for_user_without_votes(db):
-    assert db.get_discover_stats(1) == {
+    assert db.get_swipe_stats(1) == {
         'total': 0, 'likes': 0, 'dislikes': 0, 'requested': 0,
         'like_rate': 0.0, 'request_rate': 0.0, 'by_pick_type': {},
     }
@@ -153,8 +153,8 @@ def test_invalid_vote_values_are_rejected(db, kwargs, message):
     args = {'vote': 'like', 'media_type': 'movie'}
     args.update(kwargs)
     with pytest.raises(ValueError, match=message):
-        db.set_discover_vote(1, 1, args.pop('media_type'), args.pop('vote'), **args)
-    assert db.count_discover_votes(1) == 0
+        db.set_swipe_vote(1, 1, args.pop('media_type'), args.pop('vote'), **args)
+    assert db.count_swipe_votes(1) == 0
 
 
 def test_taste_profile_absent_until_saved(db):
@@ -209,30 +209,30 @@ def test_clear_votes_resets_counter_but_keeps_profile(db):
     db.increment_taste_profile_votes(1)
     _vote(db, 2, 3)
 
-    assert db.clear_discover_votes(1) == 2
+    assert db.clear_swipe_votes(1) == 2
 
-    assert db.count_discover_votes(1) == 0
-    assert db.count_discover_votes(2) == 1
+    assert db.count_swipe_votes(1) == 0
+    assert db.count_swipe_votes(2) == 1
     profile = db.get_taste_profile(1)
     assert profile['profile_text'] == 'Keep me.'
     assert profile['votes_since_update'] == 0
 
 
-def test_deleting_a_user_cascades_to_discover_rows(db):
+def test_deleting_a_user_cascades_to_swipe_rows(db):
     _vote(db, 1, 1)
     db.save_taste_profile(1, 'Gone soon.')
 
     db.connection.execute("DELETE FROM auth_users WHERE id=1")
 
-    assert db.count_discover_votes(1) == 0
+    assert db.count_swipe_votes(1) == 0
     assert db.get_taste_profile(1) is None
 
 
 def test_mysql_ddl_keeps_long_text_columns():
     manager = SchemaManager(None)
 
-    votes = manager._prepare_create_table_query_for_db('discover_votes', '', 'mysql')
-    profile = manager._prepare_create_table_query_for_db('discover_taste_profile', '', 'mysql')
+    votes = manager._prepare_create_table_query_for_db('swipe_votes', '', 'mysql')
+    profile = manager._prepare_create_table_query_for_db('swipe_taste_profile', '', 'mysql')
 
     # The generic MySQL rewrite maps TEXT to VARCHAR(512); these columns must escape it.
     assert 'rationale TEXT' in votes

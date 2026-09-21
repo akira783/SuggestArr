@@ -1,4 +1,4 @@
-"""Optional signal sources for Discover, built on the connectors SuggestArr already has.
+"""Optional signal sources for Swipe, built on the connectors SuggestArr already has.
 
 Every source is used only when it is configured, and a missing or failing source never
 blocks a batch of cards: it is logged as a warning and simply left out.
@@ -11,15 +11,15 @@ blocks a batch of cards: it is logged as a warning and simply left out.
 import asyncio
 
 from api_service.config.logger_manager import LoggerManager
-from api_service.services.discover.engagement import summarize_engagement
+from api_service.services.swipe.engagement import summarize_engagement
 
-logger = LoggerManager.get_logger("DiscoverSignals")
+logger = LoggerManager.get_logger("SwipeSignals")
 
 ENRICH_CONCURRENCY = 5
 
 
-class DiscoverSignals:
-    """Collects Discover signals from whichever connectors are configured."""
+class SwipeSignals:
+    """Collects Swipe signals from whichever connectors are configured."""
 
     def __init__(self, config):
         """

@@ -1,4 +1,4 @@
-"""Tests for the Discover signal sources.
+"""Tests for the Swipe signal sources.
 
 Covers:
 - engagement classification and ranking (pure functions)
@@ -6,7 +6,7 @@ Covers:
   the resume list; untouched titles skipped; failing queries degrade to []
 - TMDbClient.get_streaming_availability() and get_imdb_id()
 - OmdbClient.get_ratings()
-- DiscoverSignals: sources skipped when unconfigured, failures swallowed
+- SwipeSignals: sources skipped when unconfigured, failures swallowed
 """
 
 import unittest
@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 
-from api_service.services.discover import engagement as eng
-from api_service.services.discover.signals import DiscoverSignals
+from api_service.services.swipe import engagement as eng
+from api_service.services.swipe.signals import SwipeSignals
 from api_service.services.jellyfin.jellyfin_client import JellyfinClient
 from api_service.services.omdb.omdb_client import OmdbClient
 from api_service.services.tmdb.tmdb_client import TMDbClient
@@ -320,10 +320,10 @@ class TestOmdbRatings(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# DiscoverSignals facade
+# SwipeSignals facade
 # ---------------------------------------------------------------------------
 
-class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
+class TestSwipeSignals(unittest.IsolatedAsyncioTestCase):
 
     BASE = {'SELECTED_SERVICE': 'jellyfin', 'JELLYFIN_API_URL': 'http://jf', 'JELLYFIN_TOKEN': 't',
             'TMDB_API_KEY': 'k'}
@@ -333,14 +333,14 @@ class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
                               ({**self.BASE, 'JELLYFIN_TOKEN': ''}, ['u1']),
                               (self.BASE, [])):
             with patch.object(JellyfinClient, 'get_engagement_items', AsyncMock()) as fetch:
-                self.assertEqual(await DiscoverSignals(config).engagement(users), [])
+                self.assertEqual(await SwipeSignals(config).engagement(users), [])
                 fetch.assert_not_awaited()
 
     async def test_engagement_summarises_each_linked_user(self):
         raw = [{'title': 'Dark', 'media_type': 'tv', 'episodes_watched': 26, 'episodes_total': 26}]
         with patch.object(JellyfinClient, 'get_engagement_items',
                           AsyncMock(return_value=raw)) as fetch:
-            summary = await DiscoverSignals(self.BASE).engagement(['u1'])
+            summary = await SwipeSignals(self.BASE).engagement(['u1'])
         fetch.assert_awaited_once_with({'id': 'u1', 'name': 'u1'})
         self.assertEqual(summary[0]['title'], 'Dark')
         self.assertEqual(summary[0]['engagement'], eng.COMPLETED)
@@ -348,7 +348,7 @@ class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
     async def test_engagement_failure_is_swallowed(self):
         with patch.object(JellyfinClient, 'get_engagement_items',
                           AsyncMock(side_effect=RuntimeError('down'))):
-            self.assertEqual(await DiscoverSignals(self.BASE).engagement(['u1']), [])
+            self.assertEqual(await SwipeSignals(self.BASE).engagement(['u1']), [])
 
     async def test_enrich_cards_adds_badge_and_ratings(self):
         config = {**self.BASE, 'FILTER_REGION_PROVIDER': 'fr', 'OMDB_API_KEY': 'o',
@@ -361,7 +361,7 @@ class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
                 patch.object(TMDbClient, 'get_imdb_id', AsyncMock(return_value='tt1')), \
                 patch.object(OmdbClient, 'get_ratings',
                              AsyncMock(return_value={'imdb_rating': 8.0})):
-            result = await DiscoverSignals(config).enrich_cards(cards)
+            result = await SwipeSignals(config).enrich_cards(cards)
 
         self.assertIs(result, cards)
         self.assertEqual(providers.await_args_list[0].args, (1, 'movie', 'FR'))
@@ -372,7 +372,7 @@ class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
     async def test_enrich_cards_without_region_or_omdb_touches_nothing(self):
         cards = [{'id': 1, 'media_type': 'movie'}]
         with patch.object(TMDbClient, 'get_streaming_availability', AsyncMock()) as providers:
-            await DiscoverSignals(self.BASE).enrich_cards(cards)
+            await SwipeSignals(self.BASE).enrich_cards(cards)
         providers.assert_not_awaited()
         self.assertEqual(cards[0], {'id': 1, 'media_type': 'movie', 'streaming': None,
                                     'ratings': None})
@@ -389,7 +389,7 @@ class TestDiscoverSignals(unittest.IsolatedAsyncioTestCase):
             return dict(ok)
 
         with patch.object(TMDbClient, 'get_streaming_availability', side_effect=availability):
-            await DiscoverSignals(config).enrich_cards(cards)
+            await SwipeSignals(config).enrich_cards(cards)
         self.assertIsNone(cards[0]['streaming'])
         self.assertEqual(cards[1]['streaming']['providers'][0]['name'], 'Netflix')
         self.assertFalse(cards[1]['streaming']['on_user_services'])
