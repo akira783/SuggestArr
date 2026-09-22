@@ -4,8 +4,13 @@ import axios from 'axios';
 
 export const swipeStatus = () => axios.get('/api/swipe/status');
 
-export const swipeBatch = ({ mediaType = 'both', mood = '', mode = 'auto' } = {}) =>
-    axios.get('/api/swipe/batch', { params: { media_type: mediaType, mood: mood || undefined, mode } });
+export const swipeBatch = ({ mediaType = 'both', mood = '', mode = 'auto', novelty = 'balanced' } = {}) =>
+    axios.get('/api/swipe/batch', {
+        params: { media_type: mediaType, mood: mood || undefined, mode, novelty },
+    });
+
+export const swipeLikes = (requested) =>
+    axios.get('/api/swipe/likes', { params: { requested: requested === undefined ? undefined : (requested ? 1 : 0) } });
 
 export const swipeVote = (card, vote) => axios.post('/api/swipe/vote', { card, vote });
 

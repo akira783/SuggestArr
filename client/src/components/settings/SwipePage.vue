@@ -23,6 +23,20 @@
             <i :class="option.icon"></i> {{ option.label }}
           </button>
         </div>
+        <div class="swipe-segmented" role="group" aria-label="How familiar should picks be?">
+          <button
+            v-for="option in noveltyOptions"
+            :key="option.value"
+            type="button"
+            class="swipe-segment"
+            :class="{ active: novelty === option.value }"
+            :aria-pressed="novelty === option.value"
+            :title="option.hint"
+            @click="setNovelty(option.value)"
+          >
+            <i :class="option.icon"></i> {{ option.label }}
+          </button>
+        </div>
         <form class="swipe-mood" @submit.prevent="applyMood">
           <i class="fas fa-lightbulb"></i>
           <input
@@ -36,6 +50,9 @@
             <i class="fas fa-times"></i>
           </button>
         </form>
+        <button type="button" class="btn btn-secondary btn-sm swipe-taste-btn" @click="likesOpen = true">
+          <i class="fas fa-heart"></i> My likes
+        </button>
         <button type="button" class="btn btn-secondary btn-sm swipe-taste-btn" @click="profileOpen = true">
           <i class="fas fa-user-astronaut"></i> My taste
         </button>
@@ -45,7 +62,7 @@
       <div v-if="inCalibration" class="swipe-calibration">
         <div class="swipe-calibration-text">
           <strong>Calibration {{ calibrationView.done }}/{{ calibrationView.target }}</strong>
-          <span>Well-known titles to learn your taste fast. Use <em>Already seen</em> for the ones you know.</span>
+          <span>Well-known titles to learn your taste fast. Use <em>Seen it</em> for the ones you know.</span>
         </div>
         <div class="swipe-progress" role="progressbar" :aria-valuenow="calibrationView.done"
              aria-valuemin="0" :aria-valuemax="calibrationView.target">
@@ -83,6 +100,11 @@
               <div v-else class="swipe-card-placeholder">
                 <i :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
               </div>
+              <button v-if="trailerUrl(currentCard)" type="button" class="swipe-trailer-btn"
+                      aria-label="Watch the trailer" title="Watch the trailer"
+                      @pointerdown.stop @click.stop="trailerCard = currentCard">
+                <i class="fas fa-play"></i> Trailer
+              </button>
               <div class="swipe-card-badges">
                 <span class="swipe-badge">
                   <i :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
@@ -152,24 +174,54 @@
                 title="Not for me (←)" aria-label="Not for me" @click="answer('dislike')">
           <i class="fas fa-times"></i>
         </button>
-        <button type="button" class="swipe-action swipe-action-seen" :disabled="busy"
-                title="Already seen (↓)" aria-label="Already seen" @click="answer('seen')">
-          <i class="fas fa-eye"></i>
-        </button>
+        <div class="swipe-seen-group" role="group" aria-label="Already seen it">
+          <button type="button" class="swipe-seen" :disabled="busy"
+                  title="Seen it and liked it (↑)" @click="answer('seen_liked')">
+            <i class="fas fa-eye"></i> <i class="fas fa-thumbs-up"></i><span class="swipe-seen-label">Seen, liked</span>
+          </button>
+          <button type="button" class="swipe-seen" :disabled="busy"
+                  title="Seen it, didn't like it (↓)" @click="answer('seen_disliked')">
+            <i class="fas fa-eye"></i> <i class="fas fa-thumbs-down"></i><span class="swipe-seen-label">Seen, not for me</span>
+          </button>
+        </div>
         <button type="button" class="swipe-action swipe-action-like" :disabled="busy"
                 title="Like (→)" aria-label="Like" @click="answer('like')">
           <i class="fas fa-heart"></i>
         </button>
       </div>
-      <p v-if="currentCard" class="swipe-hint">Swipe or use ← ↓ → on your keyboard</p>
+      <p v-if="currentCard" class="swipe-hint">Swipe, or keys: ← nope · → like · ↑ seen & liked · ↓ seen, not for me</p>
     </template>
 
     <SwipeProfilePanel
       :open="profileOpen"
+      :auto-request="autoRequest"
       @close="profileOpen = false"
       @reset="onVotesReset"
       @recalibrate="startCalibration"
+      @update:auto-request="setAutoRequest"
     />
+
+    <SwipeLikesPanel :open="likesOpen" @close="likesOpen = false" />
+
+    <!-- Trailer -->
+    <teleport to="body">
+      <transition name="modal-fade">
+        <div v-if="trailerCard" class="modal-overlay" @click.self="trailerCard = null">
+          <div class="modal swipe-trailer-modal" role="dialog" aria-modal="true" :aria-label="'Trailer: ' + title(trailerCard)">
+            <div class="modal-header">
+              <h3 class="modal-title">{{ title(trailerCard) }}</h3>
+              <button type="button" class="modal-close" aria-label="Close" @click="trailerCard = null">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <div class="swipe-trailer-frame">
+              <iframe :src="trailerUrl(trailerCard)" :title="trailerCard.trailer.name || 'Trailer'"
+                      allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </teleport>
 
     <!-- Request? -->
     <teleport to="body">
@@ -201,44 +253,24 @@
       </transition>
     </teleport>
 
-    <!-- Already seen: liked it? -->
-    <teleport to="body">
-      <transition name="modal-fade">
-        <div v-if="seenCard" class="modal-overlay" @click.self="seenCard = null">
-          <div class="modal swipe-modal" role="dialog" aria-modal="true" aria-labelledby="swipe-seen-title">
-            <div class="modal-header">
-              <h3 id="swipe-seen-title" class="modal-title">Already seen</h3>
-            </div>
-            <div class="modal-body">
-              <p>Did you like <strong>{{ title(seenCard) }}</strong>?</p>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-ghost" @click="seenCard = null">Cancel</button>
-              <button type="button" class="btn btn-secondary" @click="confirmSeen('seen_disliked')">
-                <i class="fas fa-thumbs-down"></i> Didn't like it
-              </button>
-              <button type="button" class="btn btn-primary" @click="confirmSeen('seen_liked')">
-                <i class="fas fa-thumbs-up"></i> Liked it
-              </button>
-            </div>
-          </div>
-        </div>
-      </transition>
-    </teleport>
   </div>
 </template>
 
 <script>
 import { swipeBatch, swipeRequest, swipeStatus, swipeVote } from '@/api/swipeApi.js';
 import {
-  MAX_POLLS, POLL_INTERVAL_MS, cardKey, cardTitle, cardYear, dragRotation, keyToAction, mediaNoun,
-  mergeCards, needsMore, pickLabel, requestMessage, sleep, streamingLabel, swipeDecision,
+  MAX_POLLS, NOVELTY_OPTIONS, POLL_INTERVAL_MS, cardKey, cardTitle, cardYear, dragRotation,
+  exitDirection, isNovelty, keyToAction, mediaNoun, mergeCards, needsMore, pickLabel,
+  requestMessage, sleep, streamingLabel, swipeDecision, trailerEmbedUrl,
 } from '@/utils/swipeDeck.js';
+import SwipeLikesPanel from './SwipeLikesPanel.vue';
 import SwipeProfilePanel from './SwipeProfilePanel.vue';
 import '@/assets/styles/swipePage.css';
 
 const SKIP_CALIBRATION_KEY = 'suggestarr_swipe_skip_calibration';
 const MEDIA_TYPE_KEY = 'suggestarr_swipe_media_type';
+const NOVELTY_KEY = 'suggestarr_swipe_novelty';
+const AUTO_REQUEST_KEY = 'suggestarr_swipe_auto_request';
 
 function readStorage(key, fallback) {
   try {
@@ -259,7 +291,7 @@ function writeStorage(key, value) {
 export default {
   name: 'SwipePage',
 
-  components: { SwipeProfilePanel },
+  components: { SwipeLikesPanel, SwipeProfilePanel },
 
   data() {
     return {
@@ -278,17 +310,21 @@ export default {
         { value: 'movie', label: 'Movies', icon: 'fas fa-film' },
         { value: 'tv', label: 'Series', icon: 'fas fa-tv' },
       ],
+      novelty: isNovelty(readStorage(NOVELTY_KEY, '')) ? readStorage(NOVELTY_KEY, '') : 'balanced',
+      noveltyOptions: NOVELTY_OPTIONS,
+      autoRequest: readStorage(AUTO_REQUEST_KEY, '') === '1',
       moodInput: '',
       mood: '',
-      drag: { active: false, startX: 0, dx: 0, pointerId: null },
+      drag: { active: false, startX: 0, dx: 0, dy: 0, pointerId: null },
       leaving: false,
       busy: false,
       overviewOpen: false,
       requestCard: null,
       requesting: false,
-      seenCard: null,
       generation: 0,
       profileOpen: false,
+      likesOpen: false,
+      trailerCard: null,
       // A calibration run started from the panel counts its own votes.
       forcedCalibration: null,
     };
@@ -318,11 +354,11 @@ export default {
       if (!this.drag.active && !this.leaving) return {};
       const width = this.$refs.card?.offsetWidth || 400;
       return {
-        transform: `translateX(${this.drag.dx}px) rotate(${dragRotation(this.drag.dx, width)}deg)`,
+        transform: `translate(${this.drag.dx}px, ${this.drag.dy || 0}px) rotate(${dragRotation(this.drag.dx, width)}deg)`,
       };
     },
     modalOpen() {
-      return Boolean(this.requestCard || this.seenCard || this.profileOpen);
+      return Boolean(this.requestCard || this.profileOpen || this.likesOpen || this.trailerCard);
     },
   },
 
@@ -354,6 +390,9 @@ export default {
       return streamingLabel(card.streaming);
     },
     noun: mediaNoun,
+    trailerUrl(card) {
+      return trailerEmbedUrl(card?.trailer);
+    },
     providerNames(card) {
       return (card.streaming?.providers || []).map(p => p.name).join(', ');
     },
@@ -378,7 +417,9 @@ export default {
       this.error = '';
       try {
         for (let attempt = 0; attempt < MAX_POLLS; attempt += 1) {
-          const { data } = await swipeBatch({ mediaType: this.mediaType, mood: this.mood, mode: this.mode });
+          const { data } = await swipeBatch({
+            mediaType: this.mediaType, mood: this.mood, mode: this.mode, novelty: this.novelty,
+          });
           // A filter change while this batch was loading makes it stale.
           if (generation !== this.generation) return;
           this.activeMode = data.mode;
@@ -413,6 +454,19 @@ export default {
       writeStorage(MEDIA_TYPE_KEY, value);
       this.loading = false;
       this.loadMore(true);
+    },
+
+    setNovelty(value) {
+      if (value === this.novelty || !isNovelty(value)) return;
+      this.novelty = value;
+      writeStorage(NOVELTY_KEY, value);
+      this.loading = false;
+      this.loadMore(true);
+    },
+
+    setAutoRequest(value) {
+      this.autoRequest = Boolean(value);
+      writeStorage(AUTO_REQUEST_KEY, this.autoRequest ? '1' : '0');
     },
 
     applyMood() {
@@ -455,33 +509,28 @@ export default {
 
     // ---- answers ---------------------------------------------------------
 
-    answer(action) {
+    answer(vote) {
       const card = this.currentCard;
       if (!card || this.busy || this.modalOpen) return;
-      if (action === 'seen') {
-        this.seenCard = card;
-        return;
-      }
-      this.fling(action === 'like' ? 1 : -1, () => {
-        this.submitVote(card, action);
-        if (action === 'like') this.requestCard = card;
+      this.fling(exitDirection(vote), async () => {
+        await this.submitVote(card, vote);
+        if (vote !== 'like') return;
+        if (this.autoRequest) this.sendRequest(card);
+        else this.requestCard = card;
       });
-    },
-
-    confirmSeen(vote) {
-      const card = this.seenCard;
-      this.seenCard = null;
-      this.fling(vote === 'seen_liked' ? 1 : -1, () => this.submitVote(card, vote));
     },
 
     fling(direction, then) {
       const width = this.$refs.card?.offsetWidth || 400;
+      const height = this.$refs.card?.offsetHeight || 600;
       this.busy = true;
       this.leaving = true;
-      this.drag = { ...this.drag, active: false, dx: direction * width * 1.5 };
+      this.drag = {
+        ...this.drag, active: false, dx: direction.x * width * 1.5, dy: direction.y * height * 0.8,
+      };
       window.setTimeout(() => {
         this.leaving = false;
-        this.drag = { active: false, startX: 0, dx: 0, pointerId: null };
+        this.drag = { active: false, startX: 0, dx: 0, dy: 0, pointerId: null };
         this.overviewOpen = false;
         this.position += 1;
         this.busy = false;
@@ -518,13 +567,20 @@ export default {
       const card = this.requestCard;
       this.requesting = true;
       try {
-        const { data } = await swipeRequest(card);
-        this.$toast.success(requestMessage(data.request_status, cardTitle(card)));
-        this.requestCard = null;
-      } catch (error) {
-        this.$toast.error(error?.response?.data?.message || `Could not request ${cardTitle(card)}.`);
+        if (await this.sendRequest(card)) this.requestCard = null;
       } finally {
         this.requesting = false;
+      }
+    },
+
+    async sendRequest(card) {
+      try {
+        const { data } = await swipeRequest(card);
+        this.$toast.success(requestMessage(data.request_status, cardTitle(card)));
+        return true;
+      } catch (error) {
+        this.$toast.error(error?.response?.data?.message || `Could not request ${cardTitle(card)}.`);
+        return false;
       }
     },
 
@@ -532,7 +588,7 @@ export default {
 
     onPointerDown(event) {
       if (this.busy || this.modalOpen || event.button > 0) return;
-      this.drag = { active: true, startX: event.clientX, dx: 0, pointerId: event.pointerId };
+      this.drag = { active: true, startX: event.clientX, dx: 0, dy: 0, pointerId: event.pointerId };
       event.currentTarget.setPointerCapture?.(event.pointerId);
     },
 
@@ -548,19 +604,21 @@ export default {
       if (decision) {
         this.answer(decision);
       } else {
-        this.drag = { active: false, startX: 0, dx: 0, pointerId: null };
+        this.drag = { active: false, startX: 0, dx: 0, dy: 0, pointerId: null };
       }
     },
 
     onPointerCancel() {
-      this.drag = { active: false, startX: 0, dx: 0, pointerId: null };
+      this.drag = { active: false, startX: 0, dx: 0, dy: 0, pointerId: null };
     },
 
     onKeydown(event) {
       const target = event.target;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
       if (event.key === 'Escape' && this.modalOpen) {
-        this.seenCard = null;
+        // The taste panel handles its own closing (it may hold unsaved edits).
+        this.trailerCard = null;
+        this.likesOpen = false;
         this.closeRequest();
         return;
       }

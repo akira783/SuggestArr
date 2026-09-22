@@ -114,7 +114,7 @@ async def swipe_request():
 
 
 @swipe_bp.route("/likes", methods=["GET"])
-def swipe_likes():
+async def swipe_likes():
     """List the caller's liked cards.
 
     Query parameters:
@@ -123,7 +123,7 @@ def swipe_likes():
     try:
         flag = request.args.get("requested")
         requested = None if flag is None else flag in ("1", "true")
-        likes = SwipeService().likes(g.current_user, requested=requested)
+        likes = await SwipeService().likes(g.current_user, requested=requested)
         return jsonify({"status": "success", "likes": likes}), 200
     except Exception as exc:
         return _handle(exc, "likes")

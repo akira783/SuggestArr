@@ -43,6 +43,7 @@ SERVED_MEMORY = 100
 PREFETCH_TTL_SECONDS = 24 * 3600
 WARM_UP_ACTIVE_DAYS = 14
 TMDB_CONCURRENCY = 5
+POSTER_BACKFILL_LIMIT = 40
 MODES = ('auto', 'normal', 'calibration')
 MEDIA_TYPES = ('movie', 'tv', 'both')
 NOVELTY_LEVELS = ('familiar', 'balanced', 'bold')
@@ -622,9 +623,11 @@ class SwipeService:
                                                 rationale=card.get('rationale'))
         finally:
             await seer.close()
+        # Already requested elsewhere (a job, Seer itself) counts as requested for the
+        # likes list, otherwise the card would stay "to request" forever.
+        self.db.mark_swipe_requested(user_id, tmdb_id, media_type)
         if not enqueued:
             return {'request_status': 'already_requested'}
-        self.db.mark_swipe_requested(user_id, tmdb_id, media_type)
         approval = requires_request_approval('inherit', load_env_vars().get('REQUIRE_REQUEST_APPROVAL', False))
         return {'request_status': 'awaiting_approval' if approval else 'queued'}
 
@@ -687,15 +690,43 @@ class SwipeService:
             'refresh_error': str(error) if error is not None else None,
         }
 
-    def likes(self, user, requested=None, limit=200):
+    async def likes(self, user, requested=None, limit=200):
         """Cards the user liked (not the "already seen" ones), newest first.
+
+        Votes cast before posters were stored get theirs from TMDb once, then kept.
 
         :param requested: True / False for requested / not yet requested only; None for all.
         :return: List of vote dicts shaped like cards ('id' is the TMDb id).
         """
-        rows = self.db.get_swipe_votes(int(user['id']), limit=limit, votes=('like',),
-                                       requested=requested)
-        return [{**row, 'id': int(row['tmdb_id'])} for row in rows]
+        user_id = int(user['id'])
+        rows = self.db.get_swipe_votes(user_id, limit=limit, votes=('like',), requested=requested)
+        likes = [{**row, 'id': int(row['tmdb_id'])} for row in rows]
+        missing = [like for like in likes if not like.get('poster_path')][:POSTER_BACKFILL_LIMIT]
+        if missing and self.config.get('TMDB_API_KEY'):
+            await self._backfill_posters(user_id, missing)
+        return likes
+
+    async def _backfill_posters(self, user_id, likes):
+        from api_service.services.tmdb.tmdb_client import TMDbClient
+
+        tmdb = TMDbClient(
+            api_key=self.config.get('TMDB_API_KEY'), search_size=20, tmdb_threshold=0,
+            tmdb_min_votes=0, include_no_ratings=True, filter_release_year=0, filter_language=[],
+            filter_genre=[], filter_region_provider=None, filter_streaming_services=None,
+        )
+        semaphore = asyncio.Semaphore(TMDB_CONCURRENCY)
+
+        async def fill(like):
+            async with semaphore:
+                poster = await tmdb.get_poster_url(like['id'], like['media_type'])
+            if poster:
+                like['poster_path'] = poster
+                self.db.set_swipe_poster(user_id, like['id'], like['media_type'], poster)
+
+        try:
+            await asyncio.gather(*(fill(like) for like in likes), return_exceptions=True)
+        finally:
+            await tmdb.close()
 
     def save_profile(self, user, profile_text):
         """Store a profile written or corrected by the user."""

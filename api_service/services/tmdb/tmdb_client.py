@@ -879,6 +879,26 @@ class TMDbClient(BaseHTTPClient):
         best = min(videos, key=rank)
         return {'key': best['key'], 'name': best.get('name'), 'language': best.get('iso_639_1')}
 
+    async def get_poster_url(self, content_id, content_type):
+        """
+        Returns the w500 poster URL of a movie or TV show, or None.
+
+        :param content_id: The TMDb ID of the content item.
+        :param content_type: 'movie' or 'tv'.
+        """
+        url = f"{self.tmdb_api_url}/{content_type}/{content_id}?api_key={self.api_key}"
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
+                if response.status not in HTTP_OK:
+                    return None
+                data = await response.json()
+        except aiohttp.ClientError as e:
+            self.logger.warning("Error fetching poster: %s", str(e).replace(self.api_key, "***"))
+            return None
+        poster = data.get('poster_path')
+        return f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
+
     async def get_imdb_id(self, content_id, content_type):
         """
         Returns the IMDB ID of a movie or TV show, or None if TMDb has none.

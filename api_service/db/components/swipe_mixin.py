@@ -172,6 +172,18 @@ class SwipeMixin:
             })
         return votes
 
+    def set_swipe_poster(self, user_id, tmdb_id, media_type, poster_path):
+        """Fill in a vote's poster without changing when the vote was cast."""
+        ph = self._swipe_placeholder()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE swipe_votes SET poster_path={ph} "
+                f"WHERE user_id={ph} AND tmdb_id={ph} AND media_type={ph}",
+                (poster_path, int(user_id), str(tmdb_id), media_type),
+            )
+            conn.commit()
+
     def get_swipe_voted_ids(self, user_id, media_type=None):
         """Return the TMDb ids a user already voted on, to exclude them from new cards.
 

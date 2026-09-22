@@ -60,6 +60,18 @@
               </section>
 
               <section class="swipe-profile-section">
+                <h4>Preferences</h4>
+                <label class="swipe-profile-toggle">
+                  <input type="checkbox" :checked="autoRequest"
+                         @change="$emit('update:autoRequest', $event.target.checked)" />
+                  <span>
+                    Request liked cards right away
+                    <small>Skips the "Request this?" question. Approval rules still apply.</small>
+                  </span>
+                </label>
+              </section>
+
+              <section class="swipe-profile-section">
                 <h4>Start over</h4>
                 <div class="swipe-profile-row">
                   <button type="button" class="btn btn-secondary btn-sm" :disabled="busy" @click="recalibrate">
@@ -100,9 +112,10 @@ export default {
 
   props: {
     open: { type: Boolean, default: false },
+    autoRequest: { type: Boolean, default: false },
   },
 
-  emits: ['close', 'reset', 'recalibrate'],
+  emits: ['close', 'reset', 'recalibrate', 'update:autoRequest'],
 
   data() {
     return {

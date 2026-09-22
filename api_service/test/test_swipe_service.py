@@ -461,18 +461,32 @@ class TestNoveltyExclusionsAndLikes(SwipeServiceCase):
             await self._next(ADMIN, media_type='movie', mode='normal')
         self.assertIsNone(generate.await_args.kwargs['seen_ratio'])
 
-    def test_likes_list_and_poster(self):
+    async def test_likes_list_and_poster(self):
+        self.service.config.pop('TMDB_API_KEY', None)
         card = dict(TestVotes.CARD, poster_path='https://image.tmdb.org/t/p/w500/dune.jpg')
         self.service.vote(ADMIN, card, 'like')
         self.service.vote(ADMIN, {'id': 2, 'media_type': 'tv', 'title': 'Seen'}, 'seen_liked')
         self.db.set_swipe_vote(1, 3, 'movie', 'like')
         self.db.mark_swipe_requested(1, 3, 'movie')
 
-        pending = self.service.likes(ADMIN, requested=False)
+        pending = await self.service.likes(ADMIN, requested=False)
         self.assertEqual([(c['id'], c['media_type']) for c in pending], [(438631, 'movie')])
         self.assertTrue(pending[0]['poster_path'].endswith('/dune.jpg'))
-        self.assertEqual({c['id'] for c in self.service.likes(ADMIN)}, {438631, 3})
-        self.assertEqual([c['id'] for c in self.service.likes(ADMIN, requested=True)], [3])
+        self.assertEqual({c['id'] for c in await self.service.likes(ADMIN)}, {438631, 3})
+        self.assertEqual([c['id'] for c in await self.service.likes(ADMIN, requested=True)], [3])
+
+    async def test_missing_posters_are_backfilled_once(self):
+        self.service.config['TMDB_API_KEY'] = 'key'
+        self.db.set_swipe_vote(1, 3, 'movie', 'like')
+        before = self.db.get_swipe_votes(1)[0]['updated_at']
+        with patch('api_service.services.tmdb.tmdb_client.TMDbClient.get_poster_url',
+                   AsyncMock(return_value='https://image.tmdb.org/t/p/w500/p.jpg')) as poster:
+            likes = await self.service.likes(ADMIN)
+            again = await self.service.likes(ADMIN)
+        self.assertEqual(likes[0]['poster_path'], 'https://image.tmdb.org/t/p/w500/p.jpg')
+        self.assertEqual(again[0]['poster_path'], 'https://image.tmdb.org/t/p/w500/p.jpg')
+        poster.assert_awaited_once_with(3, 'movie')
+        self.assertEqual(self.db.get_swipe_votes(1)[0]['updated_at'], before)
 
 
 class TestLocalization(SwipeServiceCase):
@@ -603,7 +617,7 @@ class TestRequests(SwipeServiceCase):
         with cls, env:
             self.assertEqual(await self.service.request(ADMIN, dict(self.CARD)), {'request_status': 'queued'})
 
-    async def test_already_requested_keeps_existing_vote(self):
+    async def test_already_requested_keeps_vote_and_leaves_the_to_request_list(self):
         self.service.vote(ADMIN, dict(self.CARD), 'seen_liked')
         cls, env, _ = self._patch_seer(enqueued=False)
         with cls, env:
@@ -611,7 +625,7 @@ class TestRequests(SwipeServiceCase):
         self.assertEqual(result, {'request_status': 'already_requested'})
         [vote] = self.db.get_swipe_votes(1)
         self.assertEqual(vote['vote'], 'seen_liked')
-        self.assertFalse(vote['requested'])
+        self.assertTrue(vote['requested'])
 
 
 class TestProfile(SwipeServiceCase):

@@ -104,12 +104,12 @@ class TestVoteAndRequest(SwipeRouteCase):
 
 class TestLikesRoute(SwipeRouteCase):
 
-    def test_requested_flag(self):
-        self.service.likes.return_value = [{'id': 1}]
+    async def test_requested_flag(self):
+        self.service.likes = AsyncMock(return_value=[{'id': 1}])
         for query, expected in (({'requested': '0'}, False), ({'requested': '1'}, True), ({}, None)):
             with self.subTest(query=query):
                 self._context(query_string=query)
-                response, status = routes.swipe_likes()
+                response, status = await routes.swipe_likes()
                 self.assertEqual(status, 200)
                 self.assertEqual(self.service.likes.call_args.kwargs['requested'], expected)
                 self.assertEqual(response.get_json()['likes'], [{'id': 1}])

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  cardKey, cardYear, dragRotation, keyToAction, mergeCards, needsMore, pickLabel, sleep,
+  cardKey, cardYear, dragRotation, exitDirection, isNovelty, keyToAction, mergeCards, needsMore,
+  pickLabel, sleep, trailerEmbedUrl,
   requestMessage, streamingLabel, swipeDecision,
 } from './swipeDeck.js';
 
@@ -29,7 +30,8 @@ test('rotation follows the drag and is capped', () => {
 test('keyboard shortcuts', () => {
   assert.equal(keyToAction('ArrowRight'), 'like');
   assert.equal(keyToAction('ArrowLeft'), 'dislike');
-  assert.equal(keyToAction('ArrowDown'), 'seen');
+  assert.equal(keyToAction('ArrowUp'), 'seen_liked');
+  assert.equal(keyToAction('ArrowDown'), 'seen_disliked');
   assert.equal(keyToAction('Enter'), null);
 });
 
@@ -74,4 +76,24 @@ test('sleep resolves after the delay', async () => {
   const start = Date.now();
   await sleep(20);
   assert.ok(Date.now() - start >= 15);
+});
+
+test('novelty values', () => {
+  assert.equal(isNovelty('bold'), true);
+  assert.equal(isNovelty('balanced'), true);
+  assert.equal(isNovelty('wild'), false);
+});
+
+test('trailer embed only for plausible YouTube ids', () => {
+  assert.equal(trailerEmbedUrl({ key: 'dQw4w9WgXcQ' }),
+    'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0');
+  assert.equal(trailerEmbedUrl({ key: 'x"><script>' }), null);
+  assert.equal(trailerEmbedUrl(null), null);
+});
+
+test('exit directions', () => {
+  assert.deepEqual(exitDirection('like'), { x: 1, y: 0 });
+  assert.deepEqual(exitDirection('dislike'), { x: -1, y: 0 });
+  assert.deepEqual(exitDirection('seen_liked'), { x: 0, y: -1 });
+  assert.deepEqual(exitDirection('seen_disliked'), { x: 0, y: 1 });
 });

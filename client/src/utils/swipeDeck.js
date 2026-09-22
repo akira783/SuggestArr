@@ -28,7 +28,10 @@ export function dragRotation(dx, width) {
   return Math.max(-15, Math.min(15, (dx / width) * 20));
 }
 
-const KEY_ACTIONS = { ArrowRight: 'like', ArrowLeft: 'dislike', ArrowDown: 'seen' };
+// Answers: like / dislike, or "already seen" liked / disliked in one step.
+const KEY_ACTIONS = {
+  ArrowRight: 'like', ArrowLeft: 'dislike', ArrowUp: 'seen_liked', ArrowDown: 'seen_disliked',
+};
 
 export function keyToAction(key) {
   return KEY_ACTIONS[key] ?? null;
@@ -85,4 +88,28 @@ export function requestMessage(status, title) {
   if (status === 'queued') return `${title} has been requested.`;
   if (status === 'already_requested') return `${title} was already requested.`;
   return `${title}: request sent.`;
+}
+
+export const NOVELTY_OPTIONS = [
+  { value: 'familiar', label: 'Familiar', icon: 'fas fa-couch', hint: 'Well-known hits in your taste' },
+  { value: 'balanced', label: 'Balanced', icon: 'fas fa-balance-scale', hint: 'A mix of known and less obvious titles' },
+  { value: 'bold', label: 'Surprise me', icon: 'fas fa-dice', hint: 'Hidden gems and titles you have probably not seen' },
+];
+
+export function isNovelty(value) {
+  return NOVELTY_OPTIONS.some(option => option.value === value);
+}
+
+/** Privacy-friendly YouTube embed for a trailer returned by the API, or null. */
+export function trailerEmbedUrl(trailer) {
+  if (!trailer || !/^[\w-]{6,20}$/.test(trailer.key || '')) return null;
+  return `https://www.youtube-nocookie.com/embed/${trailer.key}?autoplay=1&rel=0`;
+}
+
+/** Where a vote sends the card when it leaves the screen (for the exit animation). */
+export function exitDirection(vote) {
+  if (vote === 'like') return { x: 1, y: 0 };
+  if (vote === 'dislike') return { x: -1, y: 0 };
+  if (vote === 'seen_liked') return { x: 0, y: -1 };
+  return { x: 0, y: 1 };
 }
