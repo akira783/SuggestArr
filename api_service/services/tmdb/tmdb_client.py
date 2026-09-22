@@ -840,6 +840,45 @@ class TMDbClient(BaseHTTPClient):
             'link': region_data.get('link'),
         }
 
+    async def get_trailer(self, content_id, content_type, language='en'):
+        """
+        Returns the best YouTube trailer for a title, preferring the reader's language.
+
+        Order: trailers before teasers, official before fan uploads, the reader's
+        language before English before anything else.
+
+        :param content_id: The TMDb ID of the movie or TV show.
+        :param content_type: 'movie' or 'tv'.
+        :param language: TMDb language code of the reader (e.g. 'fr' or 'pt-BR').
+        :return: dict with 'key' (YouTube id), 'name' and 'language', or None.
+        """
+        iso = (language or 'en').split('-')[0]
+        url = (f"{self.tmdb_api_url}/{content_type}/{content_id}/videos?api_key={self.api_key}"
+               f"&include_video_language={iso},en,null")
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=self.REQUEST_TIMEOUT) as response:
+                if response.status not in HTTP_OK:
+                    return None
+                data = await response.json()
+        except aiohttp.ClientError as e:
+            self.logger.warning("Error fetching trailer: %s", str(e).replace(self.api_key, "***"))
+            return None
+
+        videos = [v for v in data.get('results') or []
+                  if v.get('site') == 'YouTube' and v.get('key') and v.get('type') in ('Trailer', 'Teaser')]
+        if not videos:
+            return None
+        language_rank = {iso: 0, 'en': 1}
+
+        def rank(video):
+            return (0 if video.get('type') == 'Trailer' else 1,
+                    0 if video.get('official') else 1,
+                    language_rank.get(video.get('iso_639_1'), 2))
+
+        best = min(videos, key=rank)
+        return {'key': best['key'], 'name': best.get('name'), 'language': best.get('iso_639_1')}
+
     async def get_imdb_id(self, content_id, content_type):
         """
         Returns the IMDB ID of a movie or TV show, or None if TMDb has none.

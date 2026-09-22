@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 RECENT_DAYS = 30
 ABANDONED_AFTER_DAYS = 60
 COMPLETED_RATIO = 0.9
+MOSTLY_WATCHED_RATIO = 0.6
 ABANDONED_RATIO = 0.5
 # A series is only "dropped" if little was invested: 35 episodes of a 100-episode show
 # paused for months is a fan taking a break, not a rejection.
@@ -19,12 +20,13 @@ FINISHED_MOVIE_PCT = 90
 # Engagement labels, from strongest positive signal to strongest negative one.
 REWATCHED = 'rewatched'
 COMPLETED = 'completed'
+MOSTLY_WATCHED = 'mostly_watched'
 WATCHED = 'watched'
 IN_PROGRESS = 'in_progress'
 PARTIALLY_WATCHED = 'partially_watched'
 ABANDONED = 'abandoned'
 
-POSITIVE_LABELS = {REWATCHED, COMPLETED, WATCHED, IN_PROGRESS}
+POSITIVE_LABELS = {REWATCHED, COMPLETED, MOSTLY_WATCHED, WATCHED, IN_PROGRESS}
 NEGATIVE_LABELS = {ABANDONED}
 
 
@@ -69,6 +71,9 @@ def classify_engagement(item, now=None):
         ratio = watched / total if total else None
         if ratio is not None and ratio >= COMPLETED_RATIO:
             return COMPLETED
+        # 4 of 5 episodes is nearly finished, not dropped, however long ago.
+        if ratio is not None and ratio >= MOSTLY_WATCHED_RATIO:
+            return MOSTLY_WATCHED
         if recent:
             return IN_PROGRESS
         few_watched = watched <= ABANDONED_MAX_EPISODES and (ratio is None or ratio < ABANDONED_RATIO)

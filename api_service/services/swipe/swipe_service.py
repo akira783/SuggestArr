@@ -45,6 +45,10 @@ WARM_UP_ACTIVE_DAYS = 14
 TMDB_CONCURRENCY = 5
 MODES = ('auto', 'normal', 'calibration')
 MEDIA_TYPES = ('movie', 'tv', 'both')
+NOVELTY_LEVELS = ('familiar', 'balanced', 'bold')
+PROMPT_LIBRARY_TITLES = 150
+# Share of "already seen" answers is only meaningful over enough recent cards.
+SEEN_RATIO_MIN_VOTES = 10
 
 
 class SwipeError(Exception):
@@ -125,14 +129,25 @@ class _PrefetchStore:
         with self._lock:
             return user_id in self._refreshing, self._refresh_errors.pop(user_id, None)
 
-    def remember_served(self, user_id, keys):
+    def remember_served(self, user_id, cards):
+        """Remember cards shown to a user so they are not proposed again soon."""
+        entries = [((str(c['id']), c['media_type']),
+                    {'title': c.get('title') or c.get('name'), 'year': c.get('year'),
+                     'media_type': c['media_type']}) for c in cards]
         with self._lock:
             served = self._served.setdefault(user_id, deque(maxlen=SERVED_MEMORY))
-            served.extend(keys)
+            served.extend(entries)
 
     def served(self, user_id):
         with self._lock:
-            return set(self._served.get(user_id, ()))
+            return {key for key, _ in self._served.get(user_id, ())}
+
+    def served_titles(self, user_id, exclude_keys=()):
+        """Titles of cards shown to the user, minus *exclude_keys* (e.g. answered ones)."""
+        with self._lock:
+            entries = list(self._served.get(user_id, ()))
+        excluded = set(exclude_keys)
+        return [info for key, info in entries if key not in excluded and info.get('title')]
 
     def forget_user(self, user_id):
         with self._lock:
@@ -265,7 +280,8 @@ class SwipeService:
             return mode
         return 'calibration' if self.db.count_swipe_votes(user_id) < CALIBRATION_TARGET else 'normal'
 
-    async def next_batch(self, user, media_type='both', mood=None, mode='auto', size=BATCH_SIZE):
+    async def next_batch(self, user, media_type='both', mood=None, mode='auto', size=BATCH_SIZE,
+                         novelty='balanced'):
         """Return the next cards for *user* and start preparing the batch after it.
 
         :param user: ``g.current_user``-style dict with 'id' and 'role'.
@@ -273,6 +289,7 @@ class SwipeService:
         :param mood: Optional free-text wish for this session.
         :param mode: 'auto' (calibration until enough votes), 'normal' or 'calibration'.
         :param size: Number of cards wanted.
+        :param novelty: 'familiar', 'balanced' or 'bold' — how obvious the picks are.
         :return: Dict with 'mode', 'cards', 'pending' and 'calibration' progress.
             When no batch is ready yet, 'cards' is empty and 'pending' is True: the
             client should ask again shortly.
@@ -282,10 +299,12 @@ class SwipeService:
         """
         if media_type not in MEDIA_TYPES:
             raise SwipeError(f"media_type must be one of {', '.join(MEDIA_TYPES)}")
+        if novelty not in NOVELTY_LEVELS:
+            raise SwipeError(f"novelty must be one of {', '.join(NOVELTY_LEVELS)}")
         user_id = int(user['id'])
         mood = (mood or '').strip()[:200] or None
         effective = self._effective_mode(user_id, mode)
-        key = (user_id, media_type, (mood or '').lower(), effective)
+        key = (user_id, media_type, (mood or '').lower(), effective, novelty)
 
         ready = self.store.take(key)
         if ready is not None:
@@ -293,10 +312,10 @@ class SwipeService:
             cards = [c for c in ready if (str(c['id']), c['media_type']) not in voted]
             pending = False
             if cards:
-                self.store.remember_served(user_id, [(str(c['id']), c['media_type']) for c in cards])
-                self._generate_in_background(user, media_type, mood, effective, size, key)
+                self.store.remember_served(user_id, cards)
+                self._generate_in_background(user, media_type, mood, effective, size, key, novelty)
                 if not mood:
-                    self._remember_preference(user_id, media_type)
+                    self._remember_preference(user_id, media_type, novelty)
             # A finished but empty batch is returned as such, without starting another
             # one: otherwise a polling client would keep paying for empty generations.
         else:
@@ -304,7 +323,7 @@ class SwipeService:
             if error is not None:
                 raise error
             cards, pending = [], True
-            self._generate_in_background(user, media_type, mood, effective, size, key)
+            self._generate_in_background(user, media_type, mood, effective, size, key, novelty)
 
         votes = self.db.count_swipe_votes(user_id)
         return {
@@ -314,9 +333,9 @@ class SwipeService:
             'calibration': {'done': min(votes, CALIBRATION_TARGET), 'target': CALIBRATION_TARGET},
         }
 
-    def _remember_preference(self, user_id, media_type):
+    def _remember_preference(self, user_id, media_type, novelty):
         try:
-            self.db.set_swipe_preference(user_id, media_type)
+            self.db.set_swipe_preference(user_id, media_type, novelty)
         except Exception as exc:
             logger.warning("Could not store the Swipe preference of user %s: %s", user_id, exc)
 
@@ -330,17 +349,17 @@ class SwipeService:
         :return: Number of generations started.
         """
         started = 0
-        for user_id, media_type in self.db.get_swipe_active_users(active_days):
+        for user_id, media_type, novelty in self.db.get_swipe_active_users(active_days):
             try:
                 account = self.db.get_auth_user_by_id(user_id)
                 if not account or not account.get('is_active', True) or not self.llm_configured(user_id):
                     continue
                 user = {'id': str(user_id), 'role': account.get('role', 'user')}
                 mode = self._effective_mode(user_id, 'auto')
-                key = (user_id, media_type, '', mode)
+                key = (user_id, media_type, '', mode, novelty)
                 if self.store.has_fresh(key) or self.store.is_pending(key):
                     continue
-                self._generate_in_background(user, media_type, None, mode, BATCH_SIZE, key)
+                self._generate_in_background(user, media_type, None, mode, BATCH_SIZE, key, novelty)
                 started += 1
             except Exception as exc:
                 logger.warning("Swipe warm-up skipped user %s: %s", user_id, exc)
@@ -348,13 +367,13 @@ class SwipeService:
             logger.info("Swipe warm-up: preparing batches for %d user(s)", started)
         return started
 
-    def _generate_in_background(self, user, media_type, mood, mode, size, key):
+    def _generate_in_background(self, user, media_type, mood, mode, size, key, novelty='balanced'):
         if not self.store.start(key):
             return
 
         async def job():
             try:
-                result = await self.generate_batch(user, media_type, mood, mode, size)
+                result = await self.generate_batch(user, media_type, mood, mode, size, novelty)
             except Exception as exc:
                 self.store.put(key, None, error=exc)
                 raise
@@ -362,7 +381,7 @@ class SwipeService:
 
         _run_in_background(job, f"batch-{key[0]}")
 
-    async def generate_batch(self, user, media_type, mood, mode, size):
+    async def generate_batch(self, user, media_type, mood, mode, size, novelty='balanced'):
         """Ask the LLM for cards and turn them into enriched TMDb cards.
 
         :return: List of card dicts (TMDb fields plus rationale, pick_type,
@@ -385,6 +404,10 @@ class SwipeService:
         engagement = await self.signals.engagement(self.media_users(user))
         votes = self.db.get_swipe_votes(user_id, limit=PROMPT_VOTES)
         profile = self.db.get_taste_profile(user_id)
+        library = await self.signals.library_items()
+        voted_keys = self.db.get_swipe_voted_ids(user_id)
+        # Cards shown but not answered yet (e.g. still in the user's deck) must not return.
+        shown = self.store.served_titles(user_id, exclude_keys=voted_keys)
 
         suggestions = await generate_swipe_batch(
             user_id=user_id,
@@ -395,20 +418,30 @@ class SwipeService:
             profile_text=profile['profile_text'] if profile else None,
             engagement=engagement,
             recent_votes=votes,
-            exclude_titles=self._older_voted_titles(user_id, votes),
+            exclude_titles=self._older_voted_titles(user_id, votes) + shown,
+            library_titles=library[:PROMPT_LIBRARY_TITLES],
             mood=mood,
+            novelty=novelty,
+            seen_ratio=self._seen_ratio(votes),
             language=self.language(user_id),
         )
 
-        excluded = self._excluded_keys(user_id) | await self.signals.library_keys()
+        excluded = self._excluded_keys(user_id) | {(i['tmdb_id'], i['media_type']) for i in library}
         watched = {str(item['title']).strip().lower() for item in engagement if item.get('title')}
         cards = await self._resolve(suggestions, media_type, excluded, watched)
         cards = self._balance(cards, size, mode)
-        await self.signals.enrich_cards(cards)
+        await self.signals.enrich_cards(cards, language=self.display_language(user_id))
         await self._localize(cards, user_id)
         logger.info("Swipe batch for user %s: %d/%d cards kept (mode=%s)",
                     user_id, len(cards), len(suggestions), mode)
         return cards
+
+    @staticmethod
+    def _seen_ratio(votes):
+        """Share of recent cards the user had already seen, or None with too few votes."""
+        if len(votes) < SEEN_RATIO_MIN_VOTES:
+            return None
+        return sum(1 for v in votes if str(v.get('vote', '')).startswith('seen_')) / len(votes)
 
     def _older_voted_titles(self, user_id, recent):
         """Voted titles beyond the recent ones, so the LLM still avoids them."""
@@ -545,6 +578,7 @@ class SwipeService:
                 genres=card.get('genres') or None,
                 rationale=card.get('rationale'),
                 pick_type=card.get('pick_type'),
+                poster_path=card.get('poster_path'),
             )
         except ValueError as exc:
             raise SwipeError(str(exc)) from exc
@@ -652,6 +686,16 @@ class SwipeService:
             'refreshing': refreshing,
             'refresh_error': str(error) if error is not None else None,
         }
+
+    def likes(self, user, requested=None, limit=200):
+        """Cards the user liked (not the "already seen" ones), newest first.
+
+        :param requested: True / False for requested / not yet requested only; None for all.
+        :return: List of vote dicts shaped like cards ('id' is the TMDb id).
+        """
+        rows = self.db.get_swipe_votes(int(user['id']), limit=limit, votes=('like',),
+                                       requested=requested)
+        return [{**row, 'id': int(row['tmdb_id'])} for row in rows]
 
     def save_profile(self, user, profile_text):
         """Store a profile written or corrected by the user."""

@@ -250,7 +250,49 @@ def test_preferences_track_last_media_type_and_activity(db):
     db.connection.execute(
         "UPDATE swipe_preferences SET updated_at='2020-01-01 00:00:00' WHERE user_id=2")
 
-    assert db.get_swipe_active_users(14) == [(1, 'movie')]
-    assert sorted(db.get_swipe_active_users(100000)) == [(1, 'movie'), (2, 'both')]
+    assert db.get_swipe_active_users(14) == [(1, 'movie', 'balanced')]
+    assert sorted(db.get_swipe_active_users(100000)) == [(1, 'movie', 'balanced'),
+                                                         (2, 'both', 'balanced')]
     with pytest.raises(ValueError):
         db.set_swipe_preference(1, 'music')
+
+
+def test_poster_and_vote_filters(db):
+    _vote(db, 1, 1, 'like', poster_path='https://image.tmdb.org/t/p/w500/a.jpg')
+    _vote(db, 1, 2, 'like')
+    _vote(db, 1, 3, 'seen_liked')
+    db.mark_swipe_requested(1, 2, 'movie')
+    # A re-vote without the poster keeps it.
+    _vote(db, 1, 1, 'like')
+
+    likes = db.get_swipe_votes(1, votes=('like',))
+    assert {v['tmdb_id'] for v in likes} == {'1', '2'}
+    assert [v['tmdb_id'] for v in db.get_swipe_votes(1, votes=('like',), requested=False)] == ['1']
+    assert db.get_swipe_votes(1, votes=('like',), requested=False)[0]['poster_path'].endswith('/a.jpg')
+    assert [v['tmdb_id'] for v in db.get_swipe_votes(1, votes=('like',), requested=True)] == ['2']
+
+
+def test_preferences_store_novelty(db):
+    db.set_swipe_preference(1, 'tv', 'bold')
+    assert db.get_swipe_active_users() == [(1, 'tv', 'bold')]
+    with pytest.raises(ValueError):
+        db.set_swipe_preference(1, 'tv', 'wild')
+
+
+def test_migration_adds_columns_to_tables_created_before():
+    database = SwipeDb()
+    database.connection.executescript("""
+        CREATE TABLE swipe_votes (user_id INTEGER NOT NULL, tmdb_id TEXT NOT NULL,
+            media_type TEXT NOT NULL, vote TEXT NOT NULL, title TEXT, year INTEGER, genres TEXT,
+            rationale TEXT, pick_type TEXT, requested INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, tmdb_id, media_type));
+        CREATE TABLE swipe_preferences (user_id INTEGER PRIMARY KEY,
+            media_type TEXT NOT NULL DEFAULT 'both', updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO swipe_preferences (user_id, media_type) VALUES (1, 'tv');
+    """)
+    SchemaManager(database).initialize_db()
+
+    votes_columns = {row[1] for row in database.connection.execute('PRAGMA table_info(swipe_votes)')}
+    assert 'poster_path' in votes_columns
+    assert database.get_swipe_active_users(100000) == [(1, 'tv', 'balanced')]

@@ -82,13 +82,19 @@ class FakeSignals:
         self.engagement_users.append(users)
         return list(self._engagement)
 
+    async def library_items(self):
+        return [{'tmdb_id': tmdb_id, 'media_type': media_type, 'title': f'Owned {tmdb_id}',
+                 'year': None} for tmdb_id, media_type in sorted(self._library)]
+
     async def library_keys(self):
         return set(self._library)
 
-    async def enrich_cards(self, cards):
+    async def enrich_cards(self, cards, language='en'):
+        self.enrich_language = language
         for card in cards:
             card['streaming'] = None
             card['ratings'] = None
+            card['trailer'] = None
         return cards
 
 
@@ -244,7 +250,7 @@ class TestBatches(SwipeServiceCase):
         self.db.requested = {'2'}
         self.signals._library = {('3', 'movie')}
         self.signals._engagement = [{'title': 'Stargate Atlantis', 'media_type': 'tv'}]
-        self.store.remember_served(1, [('4', 'movie')])
+        self.store.remember_served(1, [{'id': 4, 'media_type': 'movie', 'title': 'Served'}])
         suggestions = [
             _suggestion('Voted'), _suggestion('Requested'), _suggestion('Owned'),
             _suggestion('Served'), _suggestion('Stargate Atlantis', 'tv'),
@@ -377,7 +383,7 @@ class TestPreferencesAndWarmUp(SwipeServiceCase):
         llm, make, _ = self._patch_llm([_suggestion('Dark', media_type='tv')], catalogue)
         with llm, make:
             await self._next(ADMIN, media_type='tv', mode='calibration')
-        self.assertEqual(self.db.get_swipe_active_users(), [(1, 'tv')])
+        self.assertEqual(self.db.get_swipe_active_users(), [(1, 'tv', 'balanced')])
 
     def test_warm_up_prepares_active_users_once(self):
         self.db.set_swipe_preference(1, 'tv')
@@ -404,6 +410,69 @@ class TestPreferencesAndWarmUp(SwipeServiceCase):
         self.db.set_swipe_preference(1, 'tv')
         self.service.config.pop('OPENAI_API_KEY')
         self.assertEqual(self.service.warm_up(), 0)
+
+
+class TestNoveltyExclusionsAndLikes(SwipeServiceCase):
+
+    async def test_novelty_is_part_of_the_request_and_preference(self):
+        llm, make, _ = self._patch_llm([_suggestion('Arrival')],
+                                       {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
+        with llm as generate, make:
+            await self._next(ADMIN, media_type='movie', mode='normal', novelty='bold')
+        self.assertEqual(generate.await_args.kwargs['novelty'], 'bold')
+        self.assertEqual(self.db.get_swipe_active_users(), [(1, 'movie', 'bold')])
+        with self.assertRaises(SwipeError):
+            await self.service.next_batch(ADMIN, novelty='wild')
+
+    async def test_different_novelty_is_a_different_batch(self):
+        llm, make, _ = self._patch_llm([], {})
+        with llm, make:
+            await self.service.next_batch(ADMIN, media_type='movie', mode='normal', novelty='bold')
+            await self.service.next_batch(ADMIN, media_type='movie', mode='normal', novelty='familiar')
+        self.assertEqual(len(self.background), 2)
+
+    async def test_prompt_gets_library_shown_titles_and_seen_ratio(self):
+        self.db.save_taste_profile(1, 'Loves sci-fi.')
+        for i in range(10):
+            self.db.set_swipe_vote(1, 500 + i, 'movie', 'seen_liked' if i < 6 else 'like')
+        self.signals._library = {('3', 'movie')}
+        self.store.remember_served(1, [{'id': 4, 'media_type': 'movie', 'title': 'Shown', 'year': 2001},
+                                       {'id': 500, 'media_type': 'movie', 'title': 'Answered'}])
+        llm, make, _ = self._patch_llm([_suggestion('Owned'), _suggestion('Dune')],
+                                       {('movie', 'Owned'): _item(3, 'Owned'),
+                                        ('movie', 'Dune'): _item(438631, 'Dune', 2021)})
+        with llm as generate, make:
+            result = await self._next(ADMIN, media_type='movie', mode='normal')
+        kwargs = generate.await_args.kwargs
+        self.assertEqual(kwargs['library_titles'], [{'tmdb_id': '3', 'media_type': 'movie',
+                                                     'title': 'Owned 3', 'year': None}])
+        excluded = [t['title'] for t in kwargs['exclude_titles']]
+        self.assertIn('Shown', excluded)
+        self.assertNotIn('Answered', excluded)
+        self.assertEqual(kwargs['seen_ratio'], 0.6)
+        self.assertEqual([c['id'] for c in result['cards']], [438631])
+        self.assertEqual(self.signals.enrich_language, 'fr')
+
+    async def test_seen_ratio_needs_enough_votes(self):
+        self.db.save_taste_profile(1, 'Loves sci-fi.')
+        self._vote_many(1, 3, vote='seen_liked')
+        llm, make, _ = self._patch_llm([], {})
+        with llm as generate, make:
+            await self._next(ADMIN, media_type='movie', mode='normal')
+        self.assertIsNone(generate.await_args.kwargs['seen_ratio'])
+
+    def test_likes_list_and_poster(self):
+        card = dict(TestVotes.CARD, poster_path='https://image.tmdb.org/t/p/w500/dune.jpg')
+        self.service.vote(ADMIN, card, 'like')
+        self.service.vote(ADMIN, {'id': 2, 'media_type': 'tv', 'title': 'Seen'}, 'seen_liked')
+        self.db.set_swipe_vote(1, 3, 'movie', 'like')
+        self.db.mark_swipe_requested(1, 3, 'movie')
+
+        pending = self.service.likes(ADMIN, requested=False)
+        self.assertEqual([(c['id'], c['media_type']) for c in pending], [(438631, 'movie')])
+        self.assertTrue(pending[0]['poster_path'].endswith('/dune.jpg'))
+        self.assertEqual({c['id'] for c in self.service.likes(ADMIN)}, {438631, 3})
+        self.assertEqual([c['id'] for c in self.service.likes(ADMIN, requested=True)], [3])
 
 
 class TestLocalization(SwipeServiceCase):
@@ -598,7 +667,7 @@ class TestProfile(SwipeServiceCase):
         with self.assertRaises(SwipeError):
             self.service.save_profile(ADMIN, '  ')
         self._vote_many(1, 2)
-        self.store.remember_served(1, [('5', 'movie')])
+        self.store.remember_served(1, [{'id': 5, 'media_type': 'movie', 'title': 'Shown'}])
         self.assertEqual(self.service.reset(ADMIN), {'deleted': 2})
         self.assertEqual(self.store.served(1), set())
         self.assertEqual(self.db.get_taste_profile(1)['profile_text'], 'Mine.')

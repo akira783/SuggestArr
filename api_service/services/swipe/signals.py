@@ -22,7 +22,7 @@ ENRICH_CONCURRENCY = 5
 LIBRARY_CACHE_SECONDS = 600
 
 # Library contents change rarely and listing them costs a full scan: cache per process.
-_library_cache = {'key': None, 'keys': frozenset(), 'at': 0.0}
+_library_cache = {'key': None, 'items': (), 'at': 0.0}
 _library_lock = threading.Lock()
 
 
@@ -85,8 +85,9 @@ class SwipeSignals:
             return []
         return summarize_engagement(items, limit=limit)
 
-    async def library_keys(self):
-        """``(tmdb_id, media_type)`` pairs already in the media library.
+    async def library_items(self):
+        """Titles already in the media library, as dicts with ``tmdb_id``, ``media_type``,
+        ``title`` and ``year``.
 
         Used to keep cards to titles the user does not have yet. Cached for
         ``LIBRARY_CACHE_SECONDS``; empty when the media server is not Jellyfin/Emby,
@@ -95,41 +96,48 @@ class SwipeSignals:
         service = str(self.config.get('SELECTED_SERVICE') or '').lower()
         api_url, token = self.config.get('JELLYFIN_API_URL'), self.config.get('JELLYFIN_TOKEN')
         if service not in ('jellyfin', 'emby') or not api_url or not token:
-            return set()
+            return []
         libraries = self.config.get('JELLYFIN_LIBRARIES')
         libraries = libraries if isinstance(libraries, list) and libraries else None
         cache_key = (api_url, json.dumps(libraries, sort_keys=True, default=str))
         with _library_lock:
             if (_library_cache['key'] == cache_key
                     and time.monotonic() - _library_cache['at'] < LIBRARY_CACHE_SECONDS):
-                return set(_library_cache['keys'])
+                return list(_library_cache['items'])
 
         from api_service.services.jellyfin.jellyfin_client import JellyfinClient
         client = JellyfinClient(api_url=api_url, token=token, library_ids=libraries)
         try:
             async with client:
-                items = await client.get_all_library_items() or {}
+                found = await client.get_all_library_items() or {}
         except Exception as exc:
             logger.warning("Library contents unavailable: %s", exc)
-            return set()
-        keys = frozenset(
-            (str(item['tmdb_id']), media_type)
+            return []
+        items = tuple(
+            {'tmdb_id': str(item['tmdb_id']), 'media_type': media_type,
+             'title': item.get('Name'), 'year': item.get('ProductionYear')}
             for media_type in ('movie', 'tv')
-            for item in items.get(media_type, [])
+            for item in found.get(media_type, [])
             if item.get('tmdb_id')
         )
         with _library_lock:
-            _library_cache.update(key=cache_key, keys=keys, at=time.monotonic())
-        return set(keys)
+            _library_cache.update(key=cache_key, items=items, at=time.monotonic())
+        return list(items)
 
-    async def enrich_cards(self, cards):
-        """Add streaming availability and external ratings to cards, in place.
+    async def library_keys(self):
+        """``(tmdb_id, media_type)`` pairs already in the media library."""
+        return {(item['tmdb_id'], item['media_type']) for item in await self.library_items()}
+
+    async def enrich_cards(self, cards, language='en'):
+        """Add streaming availability, external ratings and a trailer to cards, in place.
 
         Each card gains ``streaming`` (dict from ``TMDbClient.get_streaming_availability``
-        plus ``on_user_services``, or None) and ``ratings`` (dict from
-        ``OmdbClient.get_ratings``, or None).
+        plus ``on_user_services``, or None), ``ratings`` (dict from
+        ``OmdbClient.get_ratings``, or None) and ``trailer`` (dict from
+        ``TMDbClient.get_trailer``, or None).
 
         :param cards: List of card dicts with at least 'id' (TMDb id) and 'media_type'.
+        :param language: Reader's TMDb language, to prefer a trailer they understand.
         :return: The same list, for chaining.
         """
         region = self.streaming_region
@@ -138,7 +146,8 @@ class SwipeSignals:
         for card in cards:
             card.setdefault('streaming', None)
             card.setdefault('ratings', None)
-        if not cards or not tmdb_key or not (region or omdb_key):
+            card.setdefault('trailer', None)
+        if not cards or not tmdb_key:
             return cards
 
         from api_service.services.tmdb.tmdb_client import TMDbClient
@@ -171,6 +180,10 @@ class SwipeSignals:
                             str(provider['id']) in user_services for provider in streaming['providers']
                         )
                     card['streaming'] = streaming
+                try:
+                    card['trailer'] = await tmdb.get_trailer(content_id, media_type, language)
+                except Exception as exc:
+                    logger.warning("Trailer unavailable for %s: %s", content_id, exc)
                 if omdb:
                     try:
                         imdb_id = await tmdb.get_imdb_id(content_id, media_type)

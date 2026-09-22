@@ -351,6 +351,7 @@ class SchemaManager:
                     genres TEXT,
                     rationale TEXT,
                     pick_type TEXT,
+                    poster_path TEXT,
                     requested INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -374,6 +375,7 @@ class SchemaManager:
                 CREATE TABLE IF NOT EXISTS swipe_preferences (
                     user_id INTEGER PRIMARY KEY,
                     media_type TEXT NOT NULL DEFAULT 'both',
+                    novelty TEXT NOT NULL DEFAULT 'balanced',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                 )
@@ -435,6 +437,7 @@ class SchemaManager:
         # Add missing columns
         self.add_missing_columns()
         self._migrate_execution_history()
+        self._migrate_swipe_tables()
         self._create_api_key_indexes()
 
         # Create submission lock table (separate to control column types per DB engine)
@@ -480,6 +483,35 @@ class SchemaManager:
                 conn.commit()
         except Exception as exc:
             raise DatabaseError(error=f"Execution-history migration failed: {exc}", db_type=self.db_type) from exc
+
+    def _migrate_swipe_tables(self):
+        """Add Swipe columns introduced after the tables were first created."""
+        text = 'VARCHAR(512)' if self.db_type in ('mysql', 'mariadb') else 'TEXT'
+        short = 'VARCHAR(16)' if self.db_type in ('mysql', 'mariadb') else 'TEXT'
+        migrations = {
+            'swipe_votes': {'poster_path': text},
+            'swipe_preferences': {'novelty': f"{short} NOT NULL DEFAULT 'balanced'"},
+        }
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for table, columns in migrations.items():
+                    if self.db_type == 'sqlite':
+                        cursor.execute(f'PRAGMA table_info({table})')
+                        existing = {row[1] for row in cursor.fetchall()}
+                    elif self.db_type == 'postgres':
+                        cursor.execute("SELECT column_name FROM information_schema.columns "
+                                       f"WHERE table_name = '{table}'")
+                        existing = {row[0] for row in cursor.fetchall()}
+                    else:
+                        cursor.execute(f'SHOW COLUMNS FROM {table}')
+                        existing = {row[0] for row in cursor.fetchall()}
+                    for name, kind in columns.items():
+                        if name not in existing:
+                            cursor.execute(f'ALTER TABLE {table} ADD COLUMN {name} {kind}')
+                conn.commit()
+        except Exception as exc:
+            raise DatabaseError(error=f"Swipe migration failed: {exc}", db_type=self.db_type) from exc
 
     def _prepare_create_table_query_for_db(self, table_name: str, query: str, db_type: str) -> str:
         """Apply database-specific DDL rewrites for a table creation query."""
@@ -602,6 +634,7 @@ class SchemaManager:
                         genres TEXT,
                         rationale TEXT,
                         pick_type VARCHAR(16),
+                        poster_path VARCHAR(512),
                         requested TINYINT(1) NOT NULL DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -625,6 +658,7 @@ class SchemaManager:
                     CREATE TABLE IF NOT EXISTS swipe_preferences (
                         user_id INT PRIMARY KEY,
                         media_type VARCHAR(16) NOT NULL DEFAULT 'both',
+                        novelty VARCHAR(16) NOT NULL DEFAULT 'balanced',
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB

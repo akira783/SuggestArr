@@ -14,6 +14,7 @@ class SwipeMixin:
     SWIPE_POSITIVE_VOTES = ('like', 'seen_liked')
     SWIPE_PICK_TYPES = ('safe', 'explore', 'calibration')
     SWIPE_MEDIA_TYPES = ('movie', 'tv')
+    SWIPE_NOVELTY = ('familiar', 'balanced', 'bold')
 
     def _swipe_placeholder(self):
         return '%s' if self.db_type in ('mysql', 'mariadb', 'postgres') else '?'
@@ -27,7 +28,7 @@ class SwipeMixin:
             raise ValueError("media_type must be 'movie' or 'tv'")
 
     def set_swipe_vote(self, user_id, tmdb_id, media_type, vote, title=None, year=None,
-                          genres=None, rationale=None, pick_type=None):
+                          genres=None, rationale=None, pick_type=None, poster_path=None):
         """Insert or update one user's vote on a Swipe card.
 
         Re-voting on the same title replaces the vote but keeps the ``requested`` flag,
@@ -43,6 +44,7 @@ class SwipeMixin:
         :param genres: List of genre names, stored as JSON.
         :param rationale: The AI's "why for you" text shown on the card.
         :param pick_type: One of ``SWIPE_PICK_TYPES`` or None.
+        :param poster_path: Poster URL, so liked cards can be listed later.
         :return: The vote as sent by the caller (stored metadata may be richer, see above).
         :raises ValueError: On an unknown vote, media type or pick type.
         """
@@ -55,8 +57,9 @@ class SwipeMixin:
         ph = self._swipe_placeholder()
         genres_json = json.dumps(list(genres)) if genres else None
         params = (int(user_id), str(tmdb_id), media_type, vote, title, year, genres_json,
-                  rationale, pick_type)
-        columns = "(user_id, tmdb_id, media_type, vote, title, year, genres, rationale, pick_type)"
+                  rationale, pick_type, poster_path)
+        columns = ("(user_id, tmdb_id, media_type, vote, title, year, genres, rationale, pick_type, "
+                   "poster_path)")
         values = f"VALUES ({', '.join([ph] * len(params))})"
         if self.db_type in ('mysql', 'mariadb'):
             query = f"""
@@ -65,7 +68,8 @@ class SwipeMixin:
                     title=COALESCE(VALUES(title), title), year=COALESCE(VALUES(year), year),
                     genres=COALESCE(VALUES(genres), genres),
                     rationale=COALESCE(VALUES(rationale), rationale),
-                    pick_type=COALESCE(VALUES(pick_type), pick_type), updated_at=CURRENT_TIMESTAMP
+                    pick_type=COALESCE(VALUES(pick_type), pick_type),
+                    poster_path=COALESCE(VALUES(poster_path), poster_path), updated_at=CURRENT_TIMESTAMP
             """
         else:
             query = f"""
@@ -77,6 +81,7 @@ class SwipeMixin:
                     genres=COALESCE(excluded.genres, swipe_votes.genres),
                     rationale=COALESCE(excluded.rationale, swipe_votes.rationale),
                     pick_type=COALESCE(excluded.pick_type, swipe_votes.pick_type),
+                    poster_path=COALESCE(excluded.poster_path, swipe_votes.poster_path),
                     updated_at=CURRENT_TIMESTAMP
             """
         with self.get_connection() as conn:
@@ -92,6 +97,7 @@ class SwipeMixin:
             'genres': list(genres) if genres else [],
             'rationale': rationale,
             'pick_type': pick_type,
+            'poster_path': poster_path,
         }
 
     def mark_swipe_requested(self, user_id, tmdb_id, media_type):
@@ -111,23 +117,31 @@ class SwipeMixin:
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_swipe_votes(self, user_id, limit=None, media_type=None):
+    def get_swipe_votes(self, user_id, limit=None, media_type=None, votes=None, requested=None):
         """Return a user's votes, most recently changed first.
 
         :param limit: Maximum number of rows, or None for all.
         :param media_type: Restrict to 'movie' or 'tv', or None for both.
+        :param votes: Restrict to these vote values (e.g. ``('like',)``), or None.
+        :param requested: True / False to keep only requested / not requested cards.
         :return: List of vote dicts.
         """
         ph = self._swipe_placeholder()
         query = (
             "SELECT tmdb_id, media_type, vote, title, year, genres, rationale, pick_type, "
-            "requested, created_at, updated_at FROM swipe_votes WHERE user_id=" + ph
+            "requested, created_at, updated_at, poster_path FROM swipe_votes WHERE user_id=" + ph
         )
         params = [int(user_id)]
         if media_type is not None:
             self._validate_swipe_media_type(media_type)
             query += f" AND media_type={ph}"
             params.append(media_type)
+        if votes:
+            query += f" AND vote IN ({', '.join([ph] * len(votes))})"
+            params.extend(votes)
+        if requested is not None:
+            query += f" AND requested={ph}"
+            params.append(1 if requested else 0)
         # updated_at has one-second resolution; created_at/tmdb_id keep the order stable.
         query += " ORDER BY updated_at DESC, created_at DESC, tmdb_id DESC"
         if limit is not None:
@@ -154,6 +168,7 @@ class SwipeMixin:
                 'requested': bool(row[8]),
                 'created_at': self._swipe_timestamp(row[9]),
                 'updated_at': self._swipe_timestamp(row[10]),
+                'poster_path': row[11],
             })
         return votes
 
@@ -326,38 +341,45 @@ class SwipeMixin:
             conn.commit()
         return count
 
-    def set_swipe_preference(self, user_id, media_type):
-        """Remember the media type a user last browsed (and that they are active)."""
+    def set_swipe_preference(self, user_id, media_type, novelty='balanced'):
+        """Remember the filters a user last browsed with (and that they are active).
+
+        :param media_type: 'movie', 'tv' or 'both'.
+        :param novelty: One of ``SWIPE_NOVELTY``.
+        """
         if media_type not in self.SWIPE_MEDIA_TYPES + ('both',):
             raise ValueError("media_type must be 'movie', 'tv' or 'both'")
+        if novelty not in self.SWIPE_NOVELTY:
+            raise ValueError(f"novelty must be one of {', '.join(self.SWIPE_NOVELTY)}")
         ph = self._swipe_placeholder()
         if self.db_type in ('mysql', 'mariadb'):
             query = f"""
-                INSERT INTO swipe_preferences (user_id, media_type) VALUES ({ph}, {ph})
-                ON DUPLICATE KEY UPDATE media_type=VALUES(media_type), updated_at=CURRENT_TIMESTAMP
+                INSERT INTO swipe_preferences (user_id, media_type, novelty) VALUES ({ph}, {ph}, {ph})
+                ON DUPLICATE KEY UPDATE media_type=VALUES(media_type), novelty=VALUES(novelty),
+                    updated_at=CURRENT_TIMESTAMP
             """
         else:
             query = f"""
-                INSERT INTO swipe_preferences (user_id, media_type) VALUES ({ph}, {ph})
+                INSERT INTO swipe_preferences (user_id, media_type, novelty) VALUES ({ph}, {ph}, {ph})
                 ON CONFLICT(user_id) DO UPDATE SET media_type=excluded.media_type,
-                    updated_at=CURRENT_TIMESTAMP
+                    novelty=excluded.novelty, updated_at=CURRENT_TIMESTAMP
             """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(query, (int(user_id), media_type))
+            cursor.execute(query, (int(user_id), media_type, novelty))
             conn.commit()
 
     def get_swipe_active_users(self, since_days=14):
-        """Users who browsed Swipe within *since_days*, with their last media type.
+        """Users who browsed Swipe within *since_days*, with their last filters.
 
-        :return: List of ``(user_id, media_type)`` tuples.
+        :return: List of ``(user_id, media_type, novelty)`` tuples.
         """
         ph = self._swipe_placeholder()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=int(since_days))).strftime('%Y-%m-%d %H:%M:%S')
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"SELECT user_id, media_type FROM swipe_preferences WHERE updated_at >= {ph}",
+                f"SELECT user_id, media_type, novelty FROM swipe_preferences WHERE updated_at >= {ph}",
                 (cutoff,),
             )
-            return [(int(row[0]), row[1]) for row in cursor.fetchall()]
+            return [(int(row[0]), row[1], row[2] or 'balanced') for row in cursor.fetchall()]

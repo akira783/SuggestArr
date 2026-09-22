@@ -66,7 +66,10 @@ class TestClassifyEngagement(unittest.TestCase):
             (self._tv(10, 10, 400), eng.COMPLETED),
             (self._tv(3, 20, 5), eng.IN_PROGRESS),
             (self._tv(3, 20, 200), eng.ABANDONED),
-            (self._tv(12, 20, 200), eng.PARTIALLY_WATCHED),
+            (self._tv(10, 20, 200), eng.PARTIALLY_WATCHED),
+            # Most of a series watched is not dropped, however long ago (Chernobyl 4/5).
+            (self._tv(12, 20, 200), eng.MOSTLY_WATCHED),
+            (self._tv(4, 5, 400), eng.MOSTLY_WATCHED),
             # Long paused but heavily invested: a fan taking a break, not a rejection.
             (self._tv(35, 100, 90), eng.PARTIALLY_WATCHED),
             # Unknown total: a couple of episodes long ago means dropped.
@@ -325,6 +328,12 @@ class TestOmdbRatings(unittest.IsolatedAsyncioTestCase):
 
 class TestSwipeSignals(unittest.IsolatedAsyncioTestCase):
 
+    def setUp(self):
+        # Never reach the real TMDb for trailers unless a test says otherwise.
+        patcher = patch.object(TMDbClient, 'get_trailer', AsyncMock(return_value=None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     BASE = {'SELECTED_SERVICE': 'jellyfin', 'JELLYFIN_API_URL': 'http://jf', 'JELLYFIN_TOKEN': 't',
             'TMDB_API_KEY': 'k'}
 
@@ -369,13 +378,23 @@ class TestSwipeSignals(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cards[1]['streaming'])
         self.assertEqual(cards[0]['ratings'], {'imdb_rating': 8.0})
 
-    async def test_enrich_cards_without_region_or_omdb_touches_nothing(self):
+    async def test_enrich_cards_without_region_or_omdb_only_adds_the_trailer(self):
         cards = [{'id': 1, 'media_type': 'movie'}]
-        with patch.object(TMDbClient, 'get_streaming_availability', AsyncMock()) as providers:
-            await SwipeSignals(self.BASE).enrich_cards(cards)
+        trailer = {'key': 'abc', 'name': 'Bande-annonce', 'language': 'fr'}
+        with patch.object(TMDbClient, 'get_streaming_availability', AsyncMock()) as providers, \
+                patch.object(TMDbClient, 'get_trailer', AsyncMock(return_value=trailer)) as get_trailer:
+            await SwipeSignals(self.BASE).enrich_cards(cards, language='fr-FR')
         providers.assert_not_awaited()
+        get_trailer.assert_awaited_once_with(1, 'movie', 'fr-FR')
         self.assertEqual(cards[0], {'id': 1, 'media_type': 'movie', 'streaming': None,
-                                    'ratings': None})
+                                    'ratings': None, 'trailer': trailer})
+
+    async def test_enrich_cards_without_tmdb_key_touches_nothing(self):
+        cards = [{'id': 1, 'media_type': 'movie'}]
+        with patch.object(TMDbClient, 'get_trailer', AsyncMock()) as get_trailer:
+            await SwipeSignals({**self.BASE, 'TMDB_API_KEY': ''}).enrich_cards(cards)
+        get_trailer.assert_not_awaited()
+        self.assertIsNone(cards[0]['trailer'])
 
     async def test_enrich_cards_failure_on_one_card_keeps_the_others(self):
         config = {**self.BASE, 'FILTER_REGION_PROVIDER': 'FR'}
@@ -393,3 +412,36 @@ class TestSwipeSignals(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cards[0]['streaming'])
         self.assertEqual(cards[1]['streaming']['providers'][0]['name'], 'Netflix')
         self.assertFalse(cards[1]['streaming']['on_user_services'])
+
+
+class TestTmdbTrailer(unittest.IsolatedAsyncioTestCase):
+
+    async def _trailer(self, videos, language='fr-FR'):
+        client = _tmdb_client()
+        session = MagicMock()
+        session.get = MagicMock(return_value=_mock_response(200, {'results': videos}))
+        with patch.object(client, '_get_session', AsyncMock(return_value=session)):
+            result = await client.get_trailer(1, 'movie', language)
+        return result, session.get.call_args.args[0]
+
+    async def test_prefers_official_trailer_in_reader_language(self):
+        videos = [
+            {'site': 'YouTube', 'key': 'en-trailer', 'type': 'Trailer', 'official': True, 'iso_639_1': 'en'},
+            {'site': 'YouTube', 'key': 'fr-teaser', 'type': 'Teaser', 'official': True, 'iso_639_1': 'fr'},
+            {'site': 'YouTube', 'key': 'fr-fan', 'type': 'Trailer', 'official': False, 'iso_639_1': 'fr'},
+            {'site': 'YouTube', 'key': 'fr-trailer', 'type': 'Trailer', 'official': True, 'iso_639_1': 'fr',
+             'name': 'Bande-annonce VF'},
+            {'site': 'Vimeo', 'key': 'x', 'type': 'Trailer', 'official': True, 'iso_639_1': 'fr'},
+        ]
+        result, url = await self._trailer(videos)
+        self.assertEqual(result, {'key': 'fr-trailer', 'name': 'Bande-annonce VF', 'language': 'fr'})
+        self.assertIn('include_video_language=fr,en,null', url)
+
+    async def test_falls_back_to_english_then_none(self):
+        result, _ = await self._trailer([
+            {'site': 'YouTube', 'key': 'en', 'type': 'Trailer', 'official': True, 'iso_639_1': 'en'},
+            {'site': 'YouTube', 'key': 'de', 'type': 'Trailer', 'official': True, 'iso_639_1': 'de'},
+        ])
+        self.assertEqual(result['key'], 'en')
+        result, _ = await self._trailer([{'site': 'YouTube', 'key': 'clip', 'type': 'Clip'}])
+        self.assertIsNone(result)

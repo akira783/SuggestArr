@@ -41,7 +41,7 @@ class TestBatch(SwipeRouteCase):
         self.assertEqual(status, 200)
         self.assertEqual(response.get_json()['mode'], 'normal')
         self.service.next_batch.assert_awaited_once_with(USER, media_type='tv', mood='sci-fi',
-                                                         mode='auto')
+                                                         mode='auto', novelty='balanced')
 
     async def test_llm_not_configured_is_checked_before_generating(self):
         self.service.llm_configured.return_value = False
@@ -100,6 +100,19 @@ class TestVoteAndRequest(SwipeRouteCase):
         self.assertEqual(response.get_json()['status'], 'success')
         self.assertEqual(response.get_json()['request_status'], 'awaiting_approval')
         self.service.request.assert_awaited_once_with(USER, card)
+
+
+class TestLikesRoute(SwipeRouteCase):
+
+    def test_requested_flag(self):
+        self.service.likes.return_value = [{'id': 1}]
+        for query, expected in (({'requested': '0'}, False), ({'requested': '1'}, True), ({}, None)):
+            with self.subTest(query=query):
+                self._context(query_string=query)
+                response, status = routes.swipe_likes()
+                self.assertEqual(status, 200)
+                self.assertEqual(self.service.likes.call_args.kwargs['requested'], expected)
+                self.assertEqual(response.get_json()['likes'], [{'id': 1}])
 
 
 class TestProfileRoutes(SwipeRouteCase):
@@ -161,5 +174,6 @@ class TestProfileRoutes(SwipeRouteCase):
              ('/api/swipe/vote', 'POST'), ('/api/swipe/request', 'POST'),
              ('/api/swipe/profile', 'GET'), ('/api/swipe/profile', 'PUT'),
              ('/api/swipe/profile/refresh', 'POST'), ('/api/swipe/stats', 'GET'),
+             ('/api/swipe/likes', 'GET'),
              ('/api/swipe/votes', 'DELETE')},
         )

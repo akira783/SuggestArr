@@ -8,6 +8,7 @@ from api_service.exceptions.api_exceptions import LLMNotConfiguredError
 from api_service.services.llm import llm_service
 from api_service.services.llm.llm_service import (
     SWIPE_PROFILE_MAX_CHARS,
+    SWIPE_PROFILE_TARGET_CHARS,
     build_swipe_batch_prompt,
     build_taste_profile_prompt,
     generate_swipe_batch,
@@ -76,7 +77,8 @@ class TestTasteProfilePrompt(unittest.TestCase):
                                             engagement=ENGAGEMENT, language='fr')
         self.assertTrue(prompt.startswith('Write a concise taste profile'))
         self.assertIn('Stargate Atlantis', prompt)
-        self.assertIn(f'at most {SWIPE_PROFILE_MAX_CHARS} characters', prompt)
+        self.assertIn(f'at most {SWIPE_PROFILE_TARGET_CHARS} characters', prompt)
+        self.assertIn('Loves / Avoids / Nuances', prompt)
         self.assertIn('ISO code "fr"', prompt)
 
     def test_user_edited_profile_is_ground_truth(self):
@@ -142,3 +144,38 @@ class TestSwipeLlmCalls(unittest.IsolatedAsyncioTestCase):
         with patch.object(llm_service, 'get_llm_client', return_value=None):
             with self.assertRaises(LLMNotConfiguredError):
                 await generate_swipe_batch(user_id=7, count=1, media_type='movie', mode='normal')
+
+
+class TestNoveltyAndRecalibration(unittest.TestCase):
+
+    def _prompt(self, **kwargs):
+        args = {'count': 10, 'media_type': 'movie', 'mode': 'normal'}
+        args.update(kwargs)
+        return build_swipe_batch_prompt(**args)
+
+    def test_novelty_levels(self):
+        self.assertIn('favour well-known, popular', self._prompt(novelty='familiar'))
+        self.assertIn('hidden gems', self._prompt(novelty='bold'))
+        self.assertIn('mix a few well-known titles', self._prompt(novelty='balanced'))
+        self.assertIn('mix a few well-known titles', self._prompt())
+
+    def test_high_seen_ratio_warns_except_in_familiar_mode(self):
+        self.assertIn('already seen 46% of the recent cards', self._prompt(seen_ratio=0.46))
+        self.assertIn('already seen 46%', self._prompt(novelty='bold', seen_ratio=0.46))
+        self.assertNotIn('of the recent cards', self._prompt(novelty='familiar', seen_ratio=0.46))
+        self.assertNotIn('of the recent cards', self._prompt(seen_ratio=0.2))
+
+    def test_novelty_does_not_apply_to_calibration(self):
+        self.assertNotIn('NOVELTY', self._prompt(mode='calibration', novelty='bold'))
+
+    def test_recalibration_targets_uncovered_ground(self):
+        prompt = self._prompt(mode='calibration', recent_votes=VOTES)
+        self.assertIn('recalibrates', prompt)
+        self.assertIn('do NOT cover yet', prompt)
+        self.assertNotIn('The user is new', prompt)
+
+    def test_library_titles_are_listed_and_excluded(self):
+        prompt = self._prompt(library_titles=[{'title': 'Inception', 'year': 2010, 'media_type': 'movie'}])
+        self.assertIn('ALREADY IN THEIR LIBRARY', prompt)
+        self.assertIn('- Inception (movie, 2010)', prompt)
+        self.assertIn('already in their library', prompt)

@@ -62,6 +62,7 @@ async def swipe_batch():
         media_type (str): 'movie', 'tv' or 'both' (default).
         mood (str): optional free-text wish for this session.
         mode (str): 'auto' (default), 'normal' or 'calibration'.
+        novelty (str): 'familiar', 'balanced' (default) or 'bold'.
     """
     try:
         service = SwipeService()
@@ -72,6 +73,7 @@ async def swipe_batch():
             media_type=request.args.get("media_type", "both"),
             mood=request.args.get("mood"),
             mode=request.args.get("mode", "auto"),
+            novelty=request.args.get("novelty", "balanced"),
         )
         return jsonify({"status": "success", **result}), 200
     except Exception as exc:
@@ -109,6 +111,22 @@ async def swipe_request():
         return jsonify({"status": "success", **result}), 200
     except Exception as exc:
         return _handle(exc, "request")
+
+
+@swipe_bp.route("/likes", methods=["GET"])
+def swipe_likes():
+    """List the caller's liked cards.
+
+    Query parameters:
+        requested (str): '0' for not yet requested, '1' for requested, absent for all.
+    """
+    try:
+        flag = request.args.get("requested")
+        requested = None if flag is None else flag in ("1", "true")
+        likes = SwipeService().likes(g.current_user, requested=requested)
+        return jsonify({"status": "success", "likes": likes}), 200
+    except Exception as exc:
+        return _handle(exc, "likes")
 
 
 @swipe_bp.route("/profile", methods=["GET"])

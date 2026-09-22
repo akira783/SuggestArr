@@ -1056,6 +1056,9 @@ async def generate_search_result_rationales(
 # ---------------------------------------------------------------------------
 
 SWIPE_PROFILE_MAX_CHARS = 1500
+SWIPE_PROFILE_TARGET_CHARS = 700
+SWIPE_NOVELTY_LEVELS = ("familiar", "balanced", "bold")
+SEEN_RATIO_WARNING = 0.35
 
 _SWIPE_VOTE_LABELS = {
     "like": "LIKED",
@@ -1067,6 +1070,7 @@ _SWIPE_VOTE_LABELS = {
 _ENGAGEMENT_LABELS = {
     "rewatched": "watched several times",
     "completed": "watched to the end",
+    "mostly_watched": "watched most of it",
     "watched": "watched",
     "in_progress": "currently watching",
     "partially_watched": "watched part of it, paused",
@@ -1110,6 +1114,23 @@ _ENGAGEMENT_WEIGHT_NOTE = (
 )
 
 
+def _novelty_instruction(novelty: str, seen_ratio: Optional[float]) -> str:
+    """How obvious the picks should be, per the user's Familiar / Balanced / Bold choice."""
+    if novelty == "familiar":
+        return ("NOVELTY: favour well-known, popular, highly rated titles squarely in their "
+                "taste; comfort picks are welcome.")
+    seen_note = ""
+    if seen_ratio is not None and seen_ratio >= SEEN_RATIO_WARNING:
+        seen_note = (f" They had already seen {round(seen_ratio * 100)}% of the recent cards: "
+                     "avoid the obvious hits of each genre.")
+    if novelty == "bold":
+        return ("NOVELTY: favour hidden gems: lesser-known and under-seen titles, recent "
+                "releases, international productions, cult favourites; avoid blockbusters "
+                "and titles most people have seen." + seen_note)
+    return ("NOVELTY: mix a few well-known titles with less obvious ones they are unlikely "
+            "to have seen." + seen_note)
+
+
 def build_swipe_batch_prompt(
     *,
     count: int,
@@ -1120,7 +1141,10 @@ def build_swipe_batch_prompt(
     engagement: Optional[List[Dict[str, Any]]] = None,
     recent_votes: Optional[List[Dict[str, Any]]] = None,
     exclude_titles: Optional[List[Dict[str, Any]]] = None,
+    library_titles: Optional[List[Dict[str, Any]]] = None,
     mood: Optional[str] = None,
+    novelty: str = "balanced",
+    seen_ratio: Optional[float] = None,
     language: str = "en",
 ) -> str:
     """Build the user prompt asking the LLM for one batch of Swipe cards.
@@ -1133,8 +1157,12 @@ def build_swipe_batch_prompt(
     :param profile_text: The user's taste profile, if any.
     :param engagement: Output of ``summarize_engagement`` (media-server evidence).
     :param recent_votes: Most recent votes, newest first.
-    :param exclude_titles: Further titles that must not be proposed.
+    :param exclude_titles: Further titles that must not be proposed (older votes, cards
+        already shown).
+    :param library_titles: Titles already in the user's media library.
     :param mood: Optional free-text wish for this session ("sci-fi tonight").
+    :param novelty: 'familiar' (well-known hits), 'balanced' or 'bold' (hidden gems).
+    :param seen_ratio: Share of recent cards the user had already seen, if known.
     :param language: ISO 639-1 code for the rationales.
     :return: Prompt text.
     """
@@ -1155,10 +1183,23 @@ def build_swipe_batch_prompt(
         )
     if recent_votes:
         sections.append("RECENT VOTES on previous cards (newest first):\n" + _swipe_votes_text(recent_votes))
+    if library_titles:
+        sections.append(
+            "ALREADY IN THEIR LIBRARY (they have these):\n"
+            + "\n".join(f"- {_swipe_title_line(t)}" for t in library_titles)
+        )
     if mood:
         sections.append(f'WHAT THE USER FEELS LIKE RIGHT NOW: "{mood}"')
 
-    if mode == "calibration":
+    if mode == "calibration" and recent_votes:
+        picking = (
+            f"This batch recalibrates the profile of a user who already answered the cards "
+            f"above. Pick {count} well-known {what} in genres, tones, eras and countries "
+            "their answers do NOT cover yet, so each answer teaches something new; skip "
+            "the most obvious blockbusters they have probably been shown already. "
+            'Set pick_type to "calibration" for every card.'
+        )
+    elif mode == "calibration":
         picking = (
             f"The user is new, so this batch calibrates their profile. Pick {count} VERY "
             f"well-known {what} that most people have seen or heard of: big hits and "
@@ -1175,9 +1216,10 @@ def build_swipe_batch_prompt(
             "plausible for this user but a stretch. Weigh votes on adventurous picks "
             "heavily: a liked one widens the taste, a disliked one marks a boundary."
         )
+        picking += " " + _novelty_instruction(novelty, seen_ratio)
 
     never = [
-        "anything listed above as watched or voted on",
+        "anything listed above as watched, voted on or already in their library",
     ]
     if exclude_titles:
         never.append(
@@ -1247,10 +1289,12 @@ def build_taste_profile_prompt(
 {context}
 
 Rules:
-- Write in the language with ISO code "{language}", at most {SWIPE_PROFILE_MAX_CHARS} characters.
-- Three short parts: what they love, what they avoid, nuances (e.g. prefers self-contained episodes, drops long slow series).
-- State only what the evidence supports; cite example titles sparingly.
-- Dropped series and disliked cards are evidence too.
+- Write in the language with ISO code "{language}", at most {SWIPE_PROFILE_TARGET_CHARS} characters.
+- Exactly three sections, each a header line then 2 to 5 bullets ("- "), a few words per bullet, no full sentences, never "the user":
+  Loves / Avoids / Nuances (headers translated into that language).
+- Nuances are about format and habits (e.g. prefers self-contained episodes, drops long slow series).
+- State only what the evidence supports; at most one example title per bullet.
+- Dropped series and disliked cards are evidence too; a title watched most of the way is not a dropped one.
 
 Return ONLY a JSON object: {{"profile_text": "..."}}"""
 
