@@ -341,6 +341,24 @@ try:
         max_instances=1,
         replace_existing=True,
     )
+    # Swipe: have a batch ready before recently active users open the tab
+    # (shortly after start, then every 6 hours; users already served are skipped).
+    from datetime import datetime as _datetime, timedelta as _timedelta
+
+    def _warm_up_swipe():
+        try:
+            from api_service.services.swipe.swipe_service import SwipeService
+            SwipeService().warm_up()
+        except Exception as exc:
+            logger.warning(f"Swipe warm-up failed: {exc}")
+    job_manager.scheduler.add_job(
+        _warm_up_swipe, 'date', run_date=_datetime.now() + _timedelta(seconds=30),
+        id='swipe_warm_up_start', replace_existing=True,
+    )
+    job_manager.scheduler.add_job(
+        _warm_up_swipe, 'interval', hours=6, id='swipe_warm_up',
+        max_instances=1, replace_existing=True,
+    )
     logger.info("Jobs scheduler initialized (discover + recommendation + trakt_recommendations + queue_worker + cleanup)")
 except Exception as e:
     import traceback

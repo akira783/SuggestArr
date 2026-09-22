@@ -39,7 +39,9 @@ PROMPT_EXCLUDED_TITLES = 60
 # Ask for more than needed: some suggestions do not resolve on TMDb or get filtered.
 OVERSAMPLE = 1.5
 SERVED_MEMORY = 100
-PREFETCH_TTL_SECONDS = 3600
+# Prepared batches stay usable for a day: answered cards are dropped when served.
+PREFETCH_TTL_SECONDS = 24 * 3600
+WARM_UP_ACTIVE_DAYS = 14
 TMDB_CONCURRENCY = 5
 MODES = ('auto', 'normal', 'calibration')
 MEDIA_TYPES = ('movie', 'tv', 'both')
@@ -80,6 +82,12 @@ class _PrefetchStore:
     def is_pending(self, key):
         with self._lock:
             return key in self._pending
+
+    def has_fresh(self, key):
+        """True when a ready, unexpired batch is waiting for *key*."""
+        with self._lock:
+            entry = self._batches.get(key)
+            return bool(entry) and time.monotonic() - entry['created'] < PREFETCH_TTL_SECONDS
 
     def start(self, key):
         """Mark a prefetch as running; False if one is already running for *key*."""
@@ -208,14 +216,19 @@ class SwipeService:
             ]
         return []
 
-    def language(self, user_id):
-        """Language the rationales and the profile are written in."""
+    def display_language(self, user_id):
+        """TMDb language code the user reads in ('fr', 'pt-BR'...): own choice, then
+        the instance default (TMDB_LANGUAGE), then English."""
         from api_service.services.tmdb.localization import display_language
         try:
             own = self.db.get_user_language(int(user_id))
         except Exception:
             own = None
-        return display_language(own, self.config).split('-')[0]
+        return display_language(own, self.config)
+
+    def language(self, user_id):
+        """ISO 639-1 code the rationales and the profile are written in."""
+        return self.display_language(user_id).split('-')[0]
 
     def llm_configured(self, user_id):
         """True when a global or per-user OpenAI-compatible provider is set."""
@@ -282,6 +295,8 @@ class SwipeService:
             if cards:
                 self.store.remember_served(user_id, [(str(c['id']), c['media_type']) for c in cards])
                 self._generate_in_background(user, media_type, mood, effective, size, key)
+                if not mood:
+                    self._remember_preference(user_id, media_type)
             # A finished but empty batch is returned as such, without starting another
             # one: otherwise a polling client would keep paying for empty generations.
         else:
@@ -298,6 +313,40 @@ class SwipeService:
             'pending': pending,
             'calibration': {'done': min(votes, CALIBRATION_TARGET), 'target': CALIBRATION_TARGET},
         }
+
+    def _remember_preference(self, user_id, media_type):
+        try:
+            self.db.set_swipe_preference(user_id, media_type)
+        except Exception as exc:
+            logger.warning("Could not store the Swipe preference of user %s: %s", user_id, exc)
+
+    def warm_up(self, active_days=WARM_UP_ACTIVE_DAYS):
+        """Prepare a batch for every recently active user, before they open the tab.
+
+        Uses their last media type, no mood and the mode ``auto`` would pick. Users
+        with a batch already ready or being generated are skipped, so calling this
+        often costs nothing extra.
+
+        :return: Number of generations started.
+        """
+        started = 0
+        for user_id, media_type in self.db.get_swipe_active_users(active_days):
+            try:
+                account = self.db.get_auth_user_by_id(user_id)
+                if not account or not account.get('is_active', True) or not self.llm_configured(user_id):
+                    continue
+                user = {'id': str(user_id), 'role': account.get('role', 'user')}
+                mode = self._effective_mode(user_id, 'auto')
+                key = (user_id, media_type, '', mode)
+                if self.store.has_fresh(key) or self.store.is_pending(key):
+                    continue
+                self._generate_in_background(user, media_type, None, mode, BATCH_SIZE, key)
+                started += 1
+            except Exception as exc:
+                logger.warning("Swipe warm-up skipped user %s: %s", user_id, exc)
+        if started:
+            logger.info("Swipe warm-up: preparing batches for %d user(s)", started)
+        return started
 
     def _generate_in_background(self, user, media_type, mood, mode, size, key):
         if not self.store.start(key):
@@ -356,6 +405,7 @@ class SwipeService:
         cards = await self._resolve(suggestions, media_type, excluded, watched)
         cards = self._balance(cards, size, mode)
         await self.signals.enrich_cards(cards)
+        await self._localize(cards, user_id)
         logger.info("Swipe batch for user %s: %d/%d cards kept (mode=%s)",
                     user_id, len(cards), len(suggestions), mode)
         return cards
@@ -366,6 +416,22 @@ class SwipeService:
         older = [v for v in self.db.get_swipe_votes(user_id, limit=PROMPT_VOTES + PROMPT_EXCLUDED_TITLES)
                  if (v['tmdb_id'], v['media_type']) not in recent_keys]
         return older[:PROMPT_EXCLUDED_TITLES]
+
+    async def _localize(self, cards, user_id):
+        """Show titles and overviews in the user's language (cached translations)."""
+        from api_service.services.tmdb.localization import localize_items, needs_translation
+
+        language = self.display_language(user_id)
+        if not cards or not needs_translation(language):
+            return
+        try:
+            # localize_items runs its own event loop: keep it off this one.
+            await asyncio.to_thread(
+                localize_items, cards, language, self.db, self.config.get('TMDB_API_KEY'),
+                [('id', 'media_type', 'title', 'overview')],
+            )
+        except Exception as exc:
+            logger.warning("Swipe cards left untranslated: %s", exc)
 
     def _excluded_keys(self, user_id):
         excluded = set(self.db.get_swipe_voted_ids(user_id))

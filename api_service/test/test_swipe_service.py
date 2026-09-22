@@ -54,6 +54,9 @@ class Db(SwipeMixin):
     def get_user_media_profile_token(self, user_id, provider):
         return None
 
+    def get_auth_user_by_id(self, user_id):
+        return {'id': user_id, 'role': 'admin' if user_id == 1 else 'user', 'is_active': True}
+
 
 def _db():
     db = Db()
@@ -359,6 +362,84 @@ class TestBatches(SwipeServiceCase):
                 await self.service.next_batch(ADMIN, mode='calibration')
             # The error is reported once; the next call starts a fresh attempt.
             self.assertTrue((await self.service.next_batch(ADMIN, mode='calibration'))['pending'])
+
+
+class TestPreferencesAndWarmUp(SwipeServiceCase):
+
+    async def test_served_batch_records_media_type_but_not_with_a_mood(self):
+        catalogue = {('tv', 'Dark'): {'id': 70523, 'name': 'Dark', 'first_air_date': '2017-12-01'}}
+        llm, make, _ = self._patch_llm([_suggestion('Dark', media_type='tv')], catalogue)
+        with llm, make:
+            await self._next(ADMIN, media_type='tv', mode='calibration', mood='sci-fi')
+        self.assertEqual(self.db.get_swipe_active_users(), [])
+        self.background.clear()
+        self.store = self.service.store = _PrefetchStore()
+        llm, make, _ = self._patch_llm([_suggestion('Dark', media_type='tv')], catalogue)
+        with llm, make:
+            await self._next(ADMIN, media_type='tv', mode='calibration')
+        self.assertEqual(self.db.get_swipe_active_users(), [(1, 'tv')])
+
+    def test_warm_up_prepares_active_users_once(self):
+        self.db.set_swipe_preference(1, 'tv')
+        self.db.set_swipe_preference(2, 'movie')
+        self.assertEqual(self.service.warm_up(), 2)
+        self.assertEqual(sorted(name for name, _ in self.background), ['batch-1', 'batch-2'])
+        # Already being generated: nothing new is started.
+        self.assertEqual(self.service.warm_up(), 0)
+
+    async def test_warm_up_batch_is_served_for_the_default_filters(self):
+        self.db.set_swipe_preference(1, 'movie')
+        llm, make, _ = self._patch_llm([_suggestion('Arrival')],
+                                       {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
+        with llm as generate, make:
+            self.service.warm_up()
+            await self._drain()
+            result = await self.service.next_batch(ADMIN, media_type='movie')
+        self.assertFalse(result['pending'])
+        self.assertEqual([c['id'] for c in result['cards']], [329865])
+        self.assertEqual(generate.await_count, 1)
+        self.assertEqual(generate.await_args.kwargs['mode'], 'calibration')
+
+    def test_warm_up_skips_users_without_llm(self):
+        self.db.set_swipe_preference(1, 'tv')
+        self.service.config.pop('OPENAI_API_KEY')
+        self.assertEqual(self.service.warm_up(), 0)
+
+
+class TestLocalization(SwipeServiceCase):
+
+    async def test_cards_are_localized_in_the_display_language(self):
+        seen = {}
+
+        def fake_localize(items, language, db, api_key, fields):
+            seen.update(language=language, fields=fields)
+            for item in items:
+                item['title'], item['overview'] = 'Premier Contact', 'Résumé en français.'
+
+        llm, make, _ = self._patch_llm([_suggestion('Arrival')],
+                                       {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
+        with llm, make, patch('api_service.services.tmdb.localization.localize_items',
+                              side_effect=fake_localize):
+            result = await self._next(ADMIN, media_type='movie', mode='calibration')
+        self.assertEqual(seen['language'], 'fr')
+        self.assertEqual(seen['fields'], [('id', 'media_type', 'title', 'overview')])
+        self.assertEqual(result['cards'][0]['title'], 'Premier Contact')
+
+    async def test_english_needs_no_translation(self):
+        self.service.config['TMDB_LANGUAGE'] = 'en'
+        llm, make, _ = self._patch_llm([_suggestion('Arrival')],
+                                       {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
+        with llm, make, patch('api_service.services.tmdb.localization.localize_items') as localize:
+            await self._next(ADMIN, media_type='movie', mode='calibration')
+        localize.assert_not_called()
+
+    async def test_translation_failure_keeps_the_cards(self):
+        llm, make, _ = self._patch_llm([_suggestion('Arrival')],
+                                       {('movie', 'Arrival'): _item(329865, 'Arrival', 2016)})
+        with llm, make, patch('api_service.services.tmdb.localization.localize_items',
+                              side_effect=RuntimeError('TMDb down')):
+            result = await self._next(ADMIN, media_type='movie', mode='calibration')
+        self.assertEqual(result['cards'][0]['title'], 'Arrival')
 
 
 class TestBalance(unittest.TestCase):

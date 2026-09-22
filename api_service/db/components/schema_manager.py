@@ -368,6 +368,15 @@ class SchemaManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                 )
+            """,
+            # Swipe: last media type a user browsed, so a batch can be ready before they open the tab.
+            'swipe_preferences': """
+                CREATE TABLE IF NOT EXISTS swipe_preferences (
+                    user_id INTEGER PRIMARY KEY,
+                    media_type TEXT NOT NULL DEFAULT 'both',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                )
             """
         }
         
@@ -607,6 +616,15 @@ class SchemaManager:
                         profile_text TEXT NOT NULL,
                         votes_since_update INT NOT NULL DEFAULT 0,
                         user_edited TINYINT(1) NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB
+                """
+            elif table_name == 'swipe_preferences':
+                return """
+                    CREATE TABLE IF NOT EXISTS swipe_preferences (
+                        user_id INT PRIMARY KEY,
+                        media_type VARCHAR(16) NOT NULL DEFAULT 'both',
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB

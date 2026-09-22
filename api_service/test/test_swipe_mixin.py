@@ -241,3 +241,16 @@ def test_mysql_ddl_keeps_long_text_columns():
     assert 'profile_text TEXT NOT NULL' in profile
     assert votes.strip().endswith('ENGINE=InnoDB')
     assert profile.strip().endswith('ENGINE=InnoDB')
+
+
+def test_preferences_track_last_media_type_and_activity(db):
+    db.set_swipe_preference(1, 'tv')
+    db.set_swipe_preference(1, 'movie')
+    db.set_swipe_preference(2, 'both')
+    db.connection.execute(
+        "UPDATE swipe_preferences SET updated_at='2020-01-01 00:00:00' WHERE user_id=2")
+
+    assert db.get_swipe_active_users(14) == [(1, 'movie')]
+    assert sorted(db.get_swipe_active_users(100000)) == [(1, 'movie'), (2, 'both')]
+    with pytest.raises(ValueError):
+        db.set_swipe_preference(1, 'music')

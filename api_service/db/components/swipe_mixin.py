@@ -6,6 +6,7 @@ instance never see or influence each other's cards.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 
 
 class SwipeMixin:
@@ -324,3 +325,39 @@ class SwipeMixin:
             count = int(cursor.fetchone()[0])
             conn.commit()
         return count
+
+    def set_swipe_preference(self, user_id, media_type):
+        """Remember the media type a user last browsed (and that they are active)."""
+        if media_type not in self.SWIPE_MEDIA_TYPES + ('both',):
+            raise ValueError("media_type must be 'movie', 'tv' or 'both'")
+        ph = self._swipe_placeholder()
+        if self.db_type in ('mysql', 'mariadb'):
+            query = f"""
+                INSERT INTO swipe_preferences (user_id, media_type) VALUES ({ph}, {ph})
+                ON DUPLICATE KEY UPDATE media_type=VALUES(media_type), updated_at=CURRENT_TIMESTAMP
+            """
+        else:
+            query = f"""
+                INSERT INTO swipe_preferences (user_id, media_type) VALUES ({ph}, {ph})
+                ON CONFLICT(user_id) DO UPDATE SET media_type=excluded.media_type,
+                    updated_at=CURRENT_TIMESTAMP
+            """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (int(user_id), media_type))
+            conn.commit()
+
+    def get_swipe_active_users(self, since_days=14):
+        """Users who browsed Swipe within *since_days*, with their last media type.
+
+        :return: List of ``(user_id, media_type)`` tuples.
+        """
+        ph = self._swipe_placeholder()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(since_days))).strftime('%Y-%m-%d %H:%M:%S')
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT user_id, media_type FROM swipe_preferences WHERE updated_at >= {ph}",
+                (cutoff,),
+            )
+            return [(int(row[0]), row[1]) for row in cursor.fetchall()]
