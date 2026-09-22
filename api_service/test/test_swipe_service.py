@@ -12,6 +12,7 @@ from api_service.services.swipe import swipe_service as svc
 from api_service.services.swipe.swipe_service import (
     CALIBRATION_TARGET,
     PROFILE_REFRESH_EVERY,
+    SwipeAccountRequired,
     SwipeError,
     SwipeService,
     _PrefetchStore,
@@ -55,6 +56,8 @@ class Db(SwipeMixin):
         return None
 
     def get_auth_user_by_id(self, user_id):
+        if user_id not in (1, 2):
+            return None
         return {'id': user_id, 'role': 'admin' if user_id == 1 else 'user', 'is_active': True}
 
 
@@ -489,6 +492,30 @@ class TestNoveltyExclusionsAndLikes(SwipeServiceCase):
         self.assertEqual(self.db.get_swipe_votes(1)[0]['updated_at'], before)
 
 
+class TestAccountRequired(SwipeServiceCase):
+    """Auth bypass before any account exists runs as a synthetic admin with id 0."""
+
+    SYNTHETIC = {'id': '0', 'role': 'admin'}
+
+    async def test_every_write_asks_for_an_account(self):
+        self.assertFalse(self.service.status(self.SYNTHETIC)['account'])
+        with self.assertRaises(SwipeAccountRequired):
+            await self.service.next_batch(self.SYNTHETIC)
+        with self.assertRaises(SwipeAccountRequired):
+            self.service.vote(self.SYNTHETIC, dict(TestVotes.CARD), 'like')
+        with self.assertRaises(SwipeAccountRequired):
+            await self.service.request(self.SYNTHETIC, dict(TestVotes.CARD))
+        with self.assertRaises(SwipeAccountRequired):
+            self.service.save_profile(self.SYNTHETIC, 'Mine.')
+        with self.assertRaises(SwipeAccountRequired):
+            self.service.start_profile_refresh(self.SYNTHETIC)
+        self.assertEqual(self.db.count_swipe_votes(0), 0)
+        self.assertEqual(self.background, [])
+
+    def test_real_accounts_pass(self):
+        self.assertTrue(self.service.status(ADMIN)['account'])
+
+
 class TestLocalization(SwipeServiceCase):
 
     async def test_cards_are_localized_in_the_display_language(self):
@@ -568,6 +595,13 @@ class TestVotes(SwipeServiceCase):
         result = self.service.vote(ADMIN, dict(self.CARD), 'dislike')
         self.assertTrue(result['profile_refresh'])
         self.assertTrue(self.background[0][0].startswith('profile-'))
+
+    def test_no_profile_refresh_without_llm(self):
+        self.service.config.pop('OPENAI_API_KEY')
+        self._vote_many(1, CALIBRATION_TARGET - 1)
+        result = self.service.vote(ADMIN, dict(self.CARD), 'seen_liked')
+        self.assertFalse(result['profile_refresh'])
+        self.assertEqual(self.background, [])
 
     def test_profile_refresh_when_calibration_completes(self):
         self._vote_many(1, CALIBRATION_TARGET - 1)
@@ -665,6 +699,22 @@ class TestProfile(SwipeServiceCase):
         self.assertFalse(state['refreshing'])
         self.assertIsNone(state['refresh_error'])
         self.assertEqual(state['profile']['profile_text'], 'Written in the background.')
+
+    async def test_provider_errors_are_described_for_the_user(self):
+        import httpx
+        import openai
+        request = httpx.Request('POST', 'https://api.openai.com/v1/chat/completions')
+        bad_key = openai.AuthenticationError(
+            'Incorrect API key provided: sk-inval***', body=None,
+            response=httpx.Response(401, request=request))
+        self._vote_many(1, 2)
+        self.service.start_profile_refresh(ADMIN)
+        with patch('api_service.services.llm.llm_service.update_taste_profile',
+                   AsyncMock(side_effect=bad_key)):
+            await self._drain()
+        message = self.service.profile_state(ADMIN)['refresh_error']
+        self.assertIn('rejected the API key', message)
+        self.assertNotIn('sk-', message)
 
     async def test_background_refresh_error_is_reported_once(self):
         self._vote_many(1, 2)

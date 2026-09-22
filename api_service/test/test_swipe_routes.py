@@ -3,11 +3,13 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import openai
 from flask import Flask, g
 
 from api_service.blueprints.swipe import routes
 from api_service.exceptions.api_exceptions import LLMNotConfiguredError, LLMValidationError
-from api_service.services.swipe.swipe_service import SwipeError
+from api_service.services.swipe.swipe_service import SwipeAccountRequired, SwipeError
 
 USER = {'id': '7', 'role': 'user', 'username': 'akira'}
 
@@ -55,7 +57,18 @@ class TestBatch(SwipeRouteCase):
         self.service.next_batch.assert_not_awaited()
 
     async def test_error_mapping(self):
+        request = httpx.Request('POST', 'https://api.openai.com/v1/chat/completions')
+
+        def provider(cls, status):
+            return cls('boom', response=httpx.Response(status, request=request), body=None)
+
         cases = [
+            (SwipeAccountRequired('Create a SuggestArr account'), 403, 'account_required'),
+            (provider(openai.AuthenticationError, 401), 502, 'llm_auth'),
+            (provider(openai.NotFoundError, 404), 502, 'llm_model'),
+            (provider(openai.RateLimitError, 429), 502, 'llm_rate_limit'),
+            (openai.APIConnectionError(request=request), 502, 'llm_unreachable'),
+            (provider(openai.InternalServerError, 500), 502, 'llm_error'),
             (SwipeError('media_type must be one of movie, tv, both'), 400, 'invalid_input'),
             (LLMNotConfiguredError('no llm'), 400, 'llm_not_configured'),
             (LLMValidationError('bad json'), 502, 'llm_invalid'),
@@ -69,6 +82,24 @@ class TestBatch(SwipeRouteCase):
                 self.assertEqual(status, expected_status)
                 self.assertEqual(response.get_json().get('code'), code)
                 self.assertNotIn('boom', response.get_json()['message'])
+
+
+class TestSetupMode(SwipeRouteCase):
+    """Before the first account exists the middleware sets no user at all."""
+
+    async def test_routes_answer_account_required_instead_of_crashing(self):
+        context = self.app.test_request_context(method='POST', json={'card': {'id': 1}, 'vote': 'like'})
+        context.push()
+        self.addCleanup(context.pop)
+        for call in (routes.swipe_status, routes.swipe_vote.__wrapped__, routes.swipe_stats,
+                     routes.swipe_profile_get):
+            with self.subTest(route=call.__name__):
+                response, status = call()
+                self.assertEqual(status, 403)
+                self.assertEqual(response.get_json()['code'], 'account_required')
+        response, status = await routes.swipe_batch.__wrapped__()
+        self.assertEqual(status, 403)
+        self.service.next_batch.assert_not_called()
 
 
 class TestVoteAndRequest(SwipeRouteCase):

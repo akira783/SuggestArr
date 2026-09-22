@@ -56,6 +56,11 @@ class SwipeError(Exception):
     """Invalid Swipe input (unknown vote, media type, missing card id...)."""
 
 
+class SwipeAccountRequired(SwipeError):
+    """The caller is not a stored SuggestArr account (auth bypass before any account
+    exists), so there is nothing to attach votes and a profile to."""
+
+
 class _PrefetchStore:
     """Per-process store of batches generated ahead of time, and of served ids.
 
@@ -162,6 +167,35 @@ class _PrefetchStore:
 _store = _PrefetchStore()
 
 
+# AI provider failures the user can act on, most specific class first.
+_PROVIDER_ERRORS = (
+    ('AuthenticationError', 'llm_auth',
+     "The AI provider rejected the API key. Check OPENAI_API_KEY in the Advanced settings."),
+    ('PermissionDeniedError', 'llm_auth',
+     "The AI provider refused access with this API key. Check its permissions."),
+    ('NotFoundError', 'llm_model',
+     "The AI provider does not know this model. Check LLM_MODEL in the Advanced settings."),
+    ('RateLimitError', 'llm_rate_limit',
+     "The AI provider's rate limit or quota was reached. Try again later or check your plan."),
+    ('APIConnectionError', 'llm_unreachable',
+     "The AI provider could not be reached. Check OPENAI_BASE_URL and the network."),
+    ('APIError', 'llm_error', "The AI provider returned an error. Try again."),
+)
+
+
+def describe_llm_error(exc):
+    """User-facing ``{'code', 'message'}`` for an AI provider error, else None.
+
+    Raw provider errors can be long and technical; these messages say what to check.
+    """
+    import openai
+
+    for class_name, code, message in _PROVIDER_ERRORS:
+        if isinstance(exc, getattr(openai, class_name)):
+            return {'code': code, 'message': message}
+    return None
+
+
 def _run_in_background(coro_factory, name):
     """Run an async job in a daemon thread with its own event loop."""
     def runner():
@@ -255,11 +289,26 @@ class SwipeService:
         except Exception:
             return False
 
+    def has_account(self, user):
+        """True when the caller is a stored SuggestArr account."""
+        try:
+            return self.db.get_auth_user_by_id(int(user['id'])) is not None
+        except Exception:
+            return False
+
+    def require_account(self, user):
+        """Raise ``SwipeAccountRequired`` unless the caller is a stored account."""
+        if not self.has_account(user):
+            raise SwipeAccountRequired(
+                "Swipe keeps votes and a taste profile per account. Create a SuggestArr "
+                "account (Users) and sign in with it to use Swipe.")
+
     def status(self, user):
         """What the Swipe page needs to know before showing cards."""
         user_id = int(user['id'])
         votes = self.db.count_swipe_votes(user_id)
         return {
+            'account': self.has_account(user),
             'llm_configured': self.llm_configured(user_id),
             'media_history': bool(self.media_users(user)),
             'streaming_region': self.signals.streaming_region,
@@ -302,6 +351,7 @@ class SwipeService:
             raise SwipeError(f"media_type must be one of {', '.join(MEDIA_TYPES)}")
         if novelty not in NOVELTY_LEVELS:
             raise SwipeError(f"novelty must be one of {', '.join(NOVELTY_LEVELS)}")
+        self.require_account(user)
         user_id = int(user['id'])
         mood = (mood or '').strip()[:200] or None
         effective = self._effective_mode(user_id, mode)
@@ -569,6 +619,7 @@ class SwipeService:
         :return: Dict with the stored 'vote' and 'profile_refresh' (bool).
         :raises SwipeError: On an invalid card or vote.
         """
+        self.require_account(user)
         user_id = int(user['id'])
         tmdb_id, media_type = self._card_key(card)
         try:
@@ -586,7 +637,7 @@ class SwipeService:
         pending = self.db.increment_taste_profile_votes(user_id)
         total = self.db.count_swipe_votes(user_id)
         calibration_done = total == CALIBRATION_TARGET
-        refresh = pending >= PROFILE_REFRESH_EVERY or calibration_done
+        refresh = (pending >= PROFILE_REFRESH_EVERY or calibration_done) and self.llm_configured(user_id)
         if refresh:
             self.start_profile_refresh(user)
         return {'vote': stored, 'profile_refresh': refresh}
@@ -602,6 +653,7 @@ class SwipeService:
         from api_service.config.config import load_env_vars
         from api_service.services.seer.seer_client import SeerClient, requires_request_approval
 
+        self.require_account(user)
         user_id = int(user['id'])
         tmdb_id, media_type = self._card_key(card)
         if (tmdb_id, media_type) not in self.db.get_swipe_voted_ids(user_id):
@@ -665,6 +717,7 @@ class SwipeService:
 
         :return: True if a refresh was started, False if one is already running.
         """
+        self.require_account(user)
         user_id = int(user['id'])
         if not self.store.start_refresh(user_id):
             return False
@@ -684,10 +737,14 @@ class SwipeService:
         """The profile plus whether a background refresh is running or just failed."""
         user_id = int(user['id'])
         refreshing, error = self.store.refresh_state(user_id)
+        message = None
+        if error is not None:
+            described = describe_llm_error(error)
+            message = described['message'] if described else str(error)
         return {
             'profile': self.db.get_taste_profile(user_id),
             'refreshing': refreshing,
-            'refresh_error': str(error) if error is not None else None,
+            'refresh_error': message,
         }
 
     async def likes(self, user, requested=None, limit=200):
@@ -730,6 +787,7 @@ class SwipeService:
 
     def save_profile(self, user, profile_text):
         """Store a profile written or corrected by the user."""
+        self.require_account(user)
         try:
             self.db.save_taste_profile(int(user['id']), profile_text, user_edited=True)
         except ValueError as exc:

@@ -500,8 +500,10 @@ class SchemaManager:
                         cursor.execute(f'PRAGMA table_info({table})')
                         existing = {row[1] for row in cursor.fetchall()}
                     elif self.db_type == 'postgres':
+                        # Only the schema in use: a same-named table elsewhere must not
+                        # make a missing column look present.
                         cursor.execute("SELECT column_name FROM information_schema.columns "
-                                       f"WHERE table_name = '{table}'")
+                                       f"WHERE table_name = '{table}' AND table_schema = current_schema()")
                         existing = {row[0] for row in cursor.fetchall()}
                     else:
                         cursor.execute(f'SHOW COLUMNS FROM {table}')

@@ -8,7 +8,12 @@ from flask import Blueprint, g, jsonify, request
 from api_service.auth.limiter import limiter
 from api_service.config.logger_manager import LoggerManager
 from api_service.exceptions.api_exceptions import LLMNotConfiguredError, LLMValidationError
-from api_service.services.swipe.swipe_service import SwipeError, SwipeService
+from api_service.services.swipe.swipe_service import (
+    SwipeAccountRequired,
+    SwipeError,
+    SwipeService,
+    describe_llm_error,
+)
 
 swipe_bp = Blueprint("swipe", __name__)
 logger = LoggerManager.get_logger("SwipeRoute")
@@ -28,10 +33,25 @@ def _error(message, status_code, code=None):
     return jsonify(body), status_code
 
 
+def _caller():
+    """The signed-in account; raises ``SwipeAccountRequired`` in setup mode, where the
+    middleware lets requests through without any user."""
+    user = getattr(g, "current_user", None)
+    if not user or not str(user.get("id", "")).isdigit():
+        raise SwipeAccountRequired("Finish the setup and sign in to use Swipe.")
+    return user
+
+
 def _handle(exc, action):
     """Map service exceptions to HTTP responses."""
+    if isinstance(exc, SwipeAccountRequired):
+        return _error(str(exc), 403, "account_required")
     if isinstance(exc, SwipeError):
         return _error(str(exc), 400, "invalid_input")
+    provider = describe_llm_error(exc)
+    if provider:
+        logger.warning("Swipe %s: AI provider error: %s", action, exc)
+        return _error(provider['message'], 502, provider['code'])
     if isinstance(exc, LLMNotConfiguredError):
         return jsonify(_LLM_NOT_CONFIGURED), 400
     if isinstance(exc, LLMValidationError):
@@ -45,7 +65,7 @@ def _handle(exc, action):
 def swipe_status():
     """Return what the page needs before showing cards (AI configured, calibration...)."""
     try:
-        return jsonify({"status": "success", **SwipeService().status(g.current_user)}), 200
+        return jsonify({"status": "success", **SwipeService().status(_caller())}), 200
     except Exception as exc:
         return _handle(exc, "status")
 
@@ -65,11 +85,12 @@ async def swipe_batch():
         novelty (str): 'familiar', 'balanced' (default) or 'bold'.
     """
     try:
+        user = _caller()
         service = SwipeService()
-        if not service.llm_configured(g.current_user["id"]):
+        if not service.llm_configured(user["id"]):
             return jsonify(_LLM_NOT_CONFIGURED), 400
         result = await service.next_batch(
-            g.current_user,
+            user,
             media_type=request.args.get("media_type", "both"),
             mood=request.args.get("mood"),
             mode=request.args.get("mode", "auto"),
@@ -91,7 +112,7 @@ def swipe_vote():
     """
     try:
         data = request.get_json(silent=True) or {}
-        result = SwipeService().vote(g.current_user, data.get("card"), data.get("vote"))
+        result = SwipeService().vote(_caller(), data.get("card"), data.get("vote"))
         return jsonify({"status": "success", **result}), 200
     except Exception as exc:
         return _handle(exc, "vote")
@@ -107,7 +128,7 @@ async def swipe_request():
     """
     try:
         data = request.get_json(silent=True) or {}
-        result = await SwipeService().request(g.current_user, data.get("card"))
+        result = await SwipeService().request(_caller(), data.get("card"))
         return jsonify({"status": "success", **result}), 200
     except Exception as exc:
         return _handle(exc, "request")
@@ -123,7 +144,7 @@ async def swipe_likes():
     try:
         flag = request.args.get("requested")
         requested = None if flag is None else flag in ("1", "true")
-        likes = await SwipeService().likes(g.current_user, requested=requested)
+        likes = await SwipeService().likes(_caller(), requested=requested)
         return jsonify({"status": "success", "likes": likes}), 200
     except Exception as exc:
         return _handle(exc, "likes")
@@ -134,7 +155,7 @@ def swipe_profile_get():
     """Return the caller's taste profile (null before the first one), whether a
     background refresh is running, and the error of the last one if it failed."""
     try:
-        return jsonify({"status": "success", **SwipeService().profile_state(g.current_user)}), 200
+        return jsonify({"status": "success", **SwipeService().profile_state(_caller())}), 200
     except Exception as exc:
         return _handle(exc, "profile")
 
@@ -152,7 +173,7 @@ def swipe_profile_put():
         text = data.get("profile_text")
         if not isinstance(text, str):
             return _error("profile_text must be a string", 400, "invalid_input")
-        profile = SwipeService().save_profile(g.current_user, text[:4000])
+        profile = SwipeService().save_profile(_caller(), text[:4000])
         return jsonify({"status": "success", "profile": profile}), 200
     except Exception as exc:
         return _handle(exc, "profile")
@@ -163,10 +184,11 @@ def swipe_profile_put():
 def swipe_profile_refresh():
     """Start rewriting the taste profile in the background; poll GET /profile."""
     try:
+        user = _caller()
         service = SwipeService()
-        if not service.llm_configured(g.current_user["id"]):
+        if not service.llm_configured(user["id"]):
             return jsonify(_LLM_NOT_CONFIGURED), 400
-        started = service.start_profile_refresh(g.current_user)
+        started = service.start_profile_refresh(user)
         return jsonify({"status": "success", "refreshing": True, "started": started}), 202
     except Exception as exc:
         return _handle(exc, "profile refresh")
@@ -176,7 +198,7 @@ def swipe_profile_refresh():
 def swipe_stats():
     """Return the success indicators (like rate, request rate, per pick type)."""
     try:
-        stats = SwipeService().db.get_swipe_stats(int(g.current_user["id"]))
+        stats = SwipeService().db.get_swipe_stats(int(_caller()["id"]))
         return jsonify({"status": "success", "stats": stats}), 200
     except Exception as exc:
         return _handle(exc, "stats")
@@ -187,6 +209,6 @@ def swipe_stats():
 def swipe_votes_reset():
     """Delete all of the caller's votes (the profile text is kept)."""
     try:
-        return jsonify({"status": "success", **SwipeService().reset(g.current_user)}), 200
+        return jsonify({"status": "success", **SwipeService().reset(_caller())}), 200
     except Exception as exc:
         return _handle(exc, "reset")

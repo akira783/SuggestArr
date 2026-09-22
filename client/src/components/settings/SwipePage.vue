@@ -1,10 +1,20 @@
 <template>
   <div class="swipe-page">
+    <!-- Auth bypass before any account exists: nothing to attach votes to -->
+    <div v-if="status && status.account === false" class="empty-state">
+      <i aria-hidden="true" class="fas fa-user-lock"></i>
+      <h3>Swipe needs a SuggestArr account</h3>
+      <p>Votes and your taste profile are kept per account. Create one in Users and sign in with it.</p>
+    </div>
+
     <!-- AI provider missing -->
-    <div v-if="status && !status.llm_configured" class="empty-state">
-      <i class="fas fa-robot"></i>
+    <div v-else-if="status && !status.llm_configured" class="empty-state">
+      <i aria-hidden="true" class="fas fa-robot"></i>
       <h3>Swipe needs an AI provider</h3>
-      <p>Configure an OpenAI-compatible provider in the Advanced settings to get personalised cards.</p>
+      <p>
+        An OpenAI-compatible provider (OpenAI, Ollama, LM Studio, LiteLLM…) must be set in the
+        Advanced settings. If you are not an administrator, ask yours to set one up.
+      </p>
     </div>
 
     <template v-else>
@@ -20,7 +30,7 @@
             :aria-pressed="mediaType === option.value"
             @click="setMediaType(option.value)"
           >
-            <i :class="option.icon"></i> {{ option.label }}
+            <i aria-hidden="true" :class="option.icon"></i> {{ option.label }}
           </button>
         </div>
         <div class="swipe-segmented" role="group" aria-label="How familiar should picks be?">
@@ -34,11 +44,11 @@
             :title="option.hint"
             @click="setNovelty(option.value)"
           >
-            <i :class="option.icon"></i> {{ option.label }}
+            <i aria-hidden="true" :class="option.icon"></i> {{ option.label }}
           </button>
         </div>
         <form class="swipe-mood" @submit.prevent="applyMood">
-          <i class="fas fa-lightbulb"></i>
+          <i aria-hidden="true" class="fas fa-lightbulb"></i>
           <input
             v-model="moodInput"
             type="text"
@@ -47,14 +57,14 @@
             aria-label="What are you in the mood for?"
           />
           <button v-if="mood" type="button" class="swipe-mood-clear" aria-label="Clear mood" @click="clearMood">
-            <i class="fas fa-times"></i>
+            <i aria-hidden="true" class="fas fa-times"></i>
           </button>
         </form>
         <button type="button" class="btn btn-secondary btn-sm swipe-taste-btn" @click="likesOpen = true">
-          <i class="fas fa-heart"></i> My likes
+          <i aria-hidden="true" class="fas fa-heart"></i> My likes
         </button>
         <button type="button" class="btn btn-secondary btn-sm swipe-taste-btn" @click="profileOpen = true">
-          <i class="fas fa-user-astronaut"></i> My taste
+          <i aria-hidden="true" class="fas fa-user-astronaut"></i> My taste
         </button>
       </div>
 
@@ -98,21 +108,21 @@
                    :src="currentCard.backdrop_path || currentCard.poster_path"
                    :alt="title(currentCard)" class="swipe-card-image" draggable="false" />
               <div v-else class="swipe-card-placeholder">
-                <i :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
+                <i aria-hidden="true" :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
               </div>
               <button v-if="trailerUrl(currentCard)" type="button" class="swipe-trailer-btn"
                       aria-label="Watch the trailer" title="Watch the trailer"
                       @pointerdown.stop @click.stop="trailerCard = currentCard">
-                <i class="fas fa-play"></i> Trailer
+                <i aria-hidden="true" class="fas fa-play"></i> Trailer
               </button>
               <div class="swipe-card-badges">
                 <span class="swipe-badge">
-                  <i :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
+                  <i aria-hidden="true" :class="currentCard.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
                   {{ currentCard.media_type === 'tv' ? 'Series' : 'Movie' }}
                 </span>
                 <span v-if="pick(currentCard)" class="swipe-badge swipe-badge-pick"
                       :class="'pick-' + currentCard.pick_type">
-                  <i :class="currentCard.pick_type === 'explore' ? 'fas fa-dice' : 'fas fa-compass'"></i>
+                  <i aria-hidden="true" :class="currentCard.pick_type === 'explore' ? 'fas fa-dice' : 'fas fa-compass'"></i>
                   {{ pick(currentCard) }}
                 </span>
               </div>
@@ -126,25 +136,25 @@
 
               <div class="swipe-card-meta">
                 <span v-if="currentCard.rating" class="swipe-meta" title="TMDb rating">
-                  <i class="fas fa-star"></i> {{ Number(currentCard.rating).toFixed(1) }}
+                  <i aria-hidden="true" class="fas fa-star"></i> {{ Number(currentCard.rating).toFixed(1) }}
                 </span>
                 <span v-if="currentCard.ratings && currentCard.ratings.imdb_rating" class="swipe-meta" title="IMDb rating">
                   IMDb {{ currentCard.ratings.imdb_rating }}
                 </span>
                 <span v-if="currentCard.ratings && currentCard.ratings.rotten_tomatoes != null" class="swipe-meta"
                       title="Rotten Tomatoes">
-                  <i class="fas fa-lemon"></i> {{ currentCard.ratings.rotten_tomatoes }}%
+                  <i aria-hidden="true" class="fas fa-lemon"></i> {{ currentCard.ratings.rotten_tomatoes }}%
                 </span>
                 <span v-if="streaming(currentCard)" class="swipe-meta swipe-streaming"
                       :class="{ mine: currentCard.streaming.on_user_services }"
                       :title="providerNames(currentCard)">
-                  <i class="fas fa-tv"></i> {{ streaming(currentCard) }}
+                  <i aria-hidden="true" class="fas fa-tv"></i> {{ streaming(currentCard) }}
                 </span>
                 <span v-if="genreNames(currentCard)" class="swipe-meta swipe-genres">{{ genreNames(currentCard) }}</span>
               </div>
 
               <p v-if="currentCard.rationale" class="swipe-rationale">
-                <i class="fas fa-robot"></i> {{ currentCard.rationale }}
+                <i aria-hidden="true" class="fas fa-robot"></i> {{ currentCard.rationale }}
               </p>
               <p class="swipe-overview" :class="{ expanded: overviewOpen }" @click="overviewOpen = !overviewOpen">
                 {{ currentCard.overview || 'No overview available.' }}
@@ -154,16 +164,16 @@
         </div>
 
         <div v-else-if="loading" class="swipe-loading">
-          <i class="fas fa-spinner fa-spin"></i>
+          <i aria-hidden="true" class="fas fa-spinner fa-spin"></i>
           <p>Picking cards for you…</p>
         </div>
 
         <div v-else class="empty-state">
-          <i class="fas fa-layer-group"></i>
+          <i aria-hidden="true" class="fas fa-layer-group"></i>
           <h3>No more cards for now</h3>
           <p v-if="error">{{ error }}</p>
           <button type="button" class="btn btn-primary" @click="loadMore(true)">
-            <i class="fas fa-redo"></i> Try again
+            <i aria-hidden="true" class="fas fa-redo"></i> Try again
           </button>
         </div>
       </div>
@@ -172,21 +182,21 @@
       <div v-if="currentCard" class="swipe-actions">
         <button type="button" class="swipe-action swipe-action-nope" :disabled="busy"
                 title="Not for me (←)" aria-label="Not for me" @click="answer('dislike')">
-          <i class="fas fa-times"></i>
+          <i aria-hidden="true" class="fas fa-times"></i>
         </button>
         <div class="swipe-seen-group" role="group" aria-label="Already seen it">
           <button type="button" class="swipe-seen" :disabled="busy"
                   title="Seen it and liked it (↑)" @click="answer('seen_liked')">
-            <i class="fas fa-eye"></i> <i class="fas fa-thumbs-up"></i><span class="swipe-seen-label">Seen, liked</span>
+            <i aria-hidden="true" class="fas fa-eye"></i> <i aria-hidden="true" class="fas fa-thumbs-up"></i><span class="swipe-seen-label">Seen, liked</span>
           </button>
           <button type="button" class="swipe-seen" :disabled="busy"
                   title="Seen it, didn't like it (↓)" @click="answer('seen_disliked')">
-            <i class="fas fa-eye"></i> <i class="fas fa-thumbs-down"></i><span class="swipe-seen-label">Seen, not for me</span>
+            <i aria-hidden="true" class="fas fa-eye"></i> <i aria-hidden="true" class="fas fa-thumbs-down"></i><span class="swipe-seen-label">Seen, not for me</span>
           </button>
         </div>
         <button type="button" class="swipe-action swipe-action-like" :disabled="busy"
                 title="Like (→)" aria-label="Like" @click="answer('like')">
-          <i class="fas fa-heart"></i>
+          <i aria-hidden="true" class="fas fa-heart"></i>
         </button>
       </div>
       <p v-if="currentCard" class="swipe-hint">Swipe, or keys: ← nope · → like · ↑ seen & liked · ↓ seen, not for me</p>
@@ -211,7 +221,7 @@
             <div class="modal-header">
               <h3 class="modal-title">{{ title(trailerCard) }}</h3>
               <button type="button" class="modal-close" aria-label="Close" @click="trailerCard = null">
-                <i class="fas fa-times"></i>
+                <i aria-hidden="true" class="fas fa-times"></i>
               </button>
             </div>
             <div class="swipe-trailer-frame">
@@ -236,7 +246,7 @@
             <div class="modal-body">
               <p><strong>{{ title(requestCard) }}</strong><span v-if="year(requestCard)"> ({{ year(requestCard) }})</span></p>
               <p v-if="streaming(requestCard)" class="swipe-modal-note">
-                <i class="fas fa-info-circle"></i>
+                <i aria-hidden="true" class="fas fa-info-circle"></i>
                 Already available {{ streaming(requestCard).replace(/^On /, 'on ') }}<span
                   v-if="requestCard.streaming.on_user_services"> — one of your services</span>.
               </p>
@@ -245,7 +255,7 @@
             <div class="modal-footer">
               <button type="button" class="btn btn-secondary" :disabled="requesting" @click="closeRequest">Not now</button>
               <button type="button" class="btn btn-primary" :disabled="requesting" @click="confirmRequest">
-                <i :class="requesting ? 'fas fa-spinner fa-spin' : 'fas fa-paper-plane'"></i> Request
+                <i aria-hidden="true" :class="requesting ? 'fas fa-spinner fa-spin' : 'fas fa-paper-plane'"></i> Request
               </button>
             </div>
           </div>
@@ -373,7 +383,7 @@ export default {
       this.error = 'Could not reach the Swipe service.';
       return;
     }
-    if (this.status.llm_configured) await this.loadMore(true);
+    if (this.status.account !== false && this.status.llm_configured) await this.loadMore(true);
   },
 
   beforeUnmount() {

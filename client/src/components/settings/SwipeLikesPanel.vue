@@ -4,9 +4,9 @@
       <div v-if="open" class="modal-overlay" @click.self="$emit('close')">
         <div class="modal swipe-likes-modal" role="dialog" aria-modal="true" aria-labelledby="swipe-likes-title">
           <div class="modal-header">
-            <h3 id="swipe-likes-title" class="modal-title"><i class="fas fa-heart"></i> My likes</h3>
+            <h3 id="swipe-likes-title" class="modal-title"><i aria-hidden="true" class="fas fa-heart"></i> My likes</h3>
             <button type="button" class="modal-close" aria-label="Close" @click="$emit('close')">
-              <i class="fas fa-times"></i>
+              <i aria-hidden="true" class="fas fa-times"></i>
             </button>
           </div>
 
@@ -26,7 +26,7 @@
           </div>
 
           <div class="modal-body">
-            <div v-if="loading" class="swipe-profile-loading"><i class="fas fa-spinner fa-spin"></i> Loading…</div>
+            <div v-if="loading" class="swipe-profile-loading"><i aria-hidden="true" class="fas fa-spinner fa-spin"></i> Loading…</div>
             <p v-else-if="!items.length" class="swipe-profile-empty">
               {{ activeTab === 'pending' ? 'Nothing waiting: every card you liked has been requested.' : 'No requested likes yet.' }}
             </p>
@@ -34,7 +34,7 @@
               <li v-for="item in items" :key="key(item)" class="swipe-likes-item">
                 <img v-if="item.poster_path" :src="item.poster_path" :alt="item.title" class="swipe-likes-poster" loading="lazy" />
                 <div v-else class="swipe-likes-poster swipe-likes-poster-empty">
-                  <i :class="item.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
+                  <i aria-hidden="true" :class="item.media_type === 'tv' ? 'fas fa-tv' : 'fas fa-film'"></i>
                 </div>
                 <div class="swipe-likes-info">
                   <strong>{{ item.title }}</strong>
@@ -50,9 +50,9 @@
                   :disabled="requesting.has(key(item))"
                   @click="request(item)"
                 >
-                  <i :class="requesting.has(key(item)) ? 'fas fa-spinner fa-spin' : 'fas fa-paper-plane'"></i> Request
+                  <i aria-hidden="true" :class="requesting.has(key(item)) ? 'fas fa-spinner fa-spin' : 'fas fa-paper-plane'"></i> Request
                 </button>
-                <span v-else class="swipe-likes-done"><i class="fas fa-check"></i></span>
+                <span v-else class="swipe-likes-done"><i aria-hidden="true" class="fas fa-check"></i></span>
               </li>
             </ul>
           </div>

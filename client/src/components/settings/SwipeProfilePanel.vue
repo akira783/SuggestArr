@@ -4,15 +4,15 @@
       <div v-if="open" class="modal-overlay" @click.self="close">
         <div class="modal swipe-profile-modal" role="dialog" aria-modal="true" aria-labelledby="swipe-profile-title">
           <div class="modal-header">
-            <h3 id="swipe-profile-title" class="modal-title"><i class="fas fa-user-astronaut"></i> My taste</h3>
+            <h3 id="swipe-profile-title" class="modal-title"><i aria-hidden="true" class="fas fa-user-astronaut"></i> My taste</h3>
             <button type="button" class="modal-close" aria-label="Close" @click="close">
-              <i class="fas fa-times"></i>
+              <i aria-hidden="true" class="fas fa-times"></i>
             </button>
           </div>
 
           <div class="modal-body">
             <div v-if="loading" class="swipe-profile-loading">
-              <i class="fas fa-spinner fa-spin"></i> Loading…
+              <i aria-hidden="true" class="fas fa-spinner fa-spin"></i> Loading…
             </div>
 
             <template v-else>
@@ -40,10 +40,10 @@
                   </small>
                   <span class="swipe-profile-spacer"></span>
                   <button type="button" class="btn btn-secondary btn-sm" :disabled="busy" @click="regenerate">
-                    <i :class="regenerating ? 'fas fa-spinner fa-spin' : 'fas fa-magic'"></i> Regenerate
+                    <i aria-hidden="true" :class="regenerating ? 'fas fa-spinner fa-spin' : 'fas fa-magic'"></i> Regenerate
                   </button>
                   <button type="button" class="btn btn-primary btn-sm" :disabled="busy || !dirty" @click="save">
-                    <i :class="saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'"></i> Save
+                    <i aria-hidden="true" :class="saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'"></i> Save
                   </button>
                 </div>
               </section>
@@ -75,11 +75,11 @@
                 <h4>Start over</h4>
                 <div class="swipe-profile-row">
                   <button type="button" class="btn btn-secondary btn-sm" :disabled="busy" @click="recalibrate">
-                    <i class="fas fa-compass"></i> Run calibration again
+                    <i aria-hidden="true" class="fas fa-compass"></i> Run calibration again
                   </button>
                   <button v-if="!confirmReset" type="button" class="btn btn-outline btn-sm swipe-profile-danger"
                           :disabled="busy || !stats || !stats.total" @click="confirmReset = true">
-                    <i class="fas fa-trash"></i> Reset my votes
+                    <i aria-hidden="true" class="fas fa-trash"></i> Reset my votes
                   </button>
                 </div>
                 <div v-if="confirmReset" class="swipe-profile-confirm" role="alert">
@@ -87,7 +87,7 @@
                   <div class="swipe-profile-row">
                     <button type="button" class="btn btn-ghost btn-sm" @click="confirmReset = false">Cancel</button>
                     <button type="button" class="btn btn-danger btn-sm" :disabled="busy" @click="reset">
-                      <i :class="resetting ? 'fas fa-spinner fa-spin' : 'fas fa-trash'"></i> Delete votes
+                      <i aria-hidden="true" :class="resetting ? 'fas fa-spinner fa-spin' : 'fas fa-trash'"></i> Delete votes
                     </button>
                   </div>
                 </div>
@@ -202,7 +202,7 @@ export default {
           const { data } = await swipeProfile();
           if (data.refreshing) continue;
           if (data.refresh_error) {
-            this.$toast.error('The AI could not rewrite your profile. Try again.');
+            this.$toast.error(data.refresh_error);
           } else if (data.profile && data.profile.updated_at !== before) {
             this.setProfile(data.profile);
             this.$toast.success('Profile updated from your votes and viewing history.');
